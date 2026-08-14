@@ -1,0 +1,11 @@
+[application]
+name = "xp-static-wiki"
+asset_dir = "assets"
+
+[web.app]
+title = "XP Static Wiki"
+
+[web.watcher]
+watch_path = ["src", "assets", "input.css"]
+reload_html = true
+index_on_404 = true

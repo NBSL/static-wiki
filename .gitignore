@@ -1,0 +1,8 @@
+/target
+/dist
+/wiki-data
+/.dioxus
+/node_modules
+.env
+*.db
+*.sqlite

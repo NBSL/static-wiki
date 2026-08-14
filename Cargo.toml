@@ -1,0 +1,53 @@
+[package]
+name = "xp-static-wiki"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+markdown-it = { version = "0.6", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+git2 = { version = "0.20", optional = true }
+dotenvy = { version = "0.15", optional = true }
+oauth2 = { version = "5", optional = true }
+once_cell = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+role-system = { version = "1.1.1", default-features = false, features = ["persistence"], optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+web = ["dioxus/web"]
+desktop = ["dioxus/desktop"]
+server = [
+    "dioxus/server",
+    "dep:base64",
+    "dep:dotenvy",
+    "dep:git2",
+    "dep:oauth2",
+    "dep:once_cell",
+    "dep:reqwest",
+    "dep:role-system",
+    "dep:thiserror",
+    "dep:tokio",
+    "dep:uuid",
+]
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.desktop-dev]
+inherits = "dev"
