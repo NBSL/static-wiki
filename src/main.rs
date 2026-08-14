@@ -1,20 +1,25 @@
 mod markdown;
+mod markdown_components;
 mod models;
 mod slug;
+mod user;
 
 #[cfg(feature = "server")]
 mod server;
 
 use dioxus::prelude::*;
-use markdown::{compose_page_markdown, render_markdown};
+use markdown::{compose_page_markdown, render_markdown_with_component_manifests};
 use models::{
-    AuthProviderInfo, AuthUser, DiffLineKind, ManagedUser, ManagedUserInput, PageDetail, PageDiff,
-    PageRevision, PageSummary, UserAccess,
+    AuthProviderInfo, DiffLineKind, PageDetail, PageDiff, PageRevision, PageSummary,
+    PageTemplateDraft, PageTemplateSummary,
 };
 use slug::normalize_slug;
+use user::{
+    delete_managed_user, list_managed_users, save_managed_user, AuthUser, ManagedUser,
+    ManagedUserInput, UserAccess, UsersView, NO_ROLE_LABEL,
+};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
-const NO_ROLE_LABEL: &str = "none";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveTab {
@@ -24,13 +29,25 @@ enum ActiveTab {
     Users,
 }
 
+fn markdown_component_manifests(state: &Option<ServerFnResult<Vec<String>>>) -> Vec<String> {
+    state
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn main() {
     #[cfg(feature = "server")]
     {
         dioxus::serve(|| async move {
-            use dioxus::server::axum::routing::get as axum_get;
+            use dioxus::server::{
+                axum::{routing::get as axum_get, Router},
+                DioxusRouterExt, ServeConfig,
+            };
 
-            let router = dioxus::server::router(App)
+            let router = Router::new()
+                .route("/media/{*path}", axum_get(media_handler))
                 .route(
                     "/auth/login/{provider}",
                     axum_get(server::auth::login_handler),
@@ -39,7 +56,8 @@ fn main() {
                     "/auth/callback/{provider}",
                     axum_get(server::auth::callback_handler),
                 )
-                .route("/auth/logout", axum_get(server::auth::logout_handler));
+                .route("/auth/logout", axum_get(server::auth::logout_handler))
+                .serve_dioxus_application(ServeConfig::new(), App);
 
             Ok(router)
         });
@@ -70,6 +88,8 @@ fn App() -> Element {
     let mut editor_title = use_signal(String::new);
     let mut editor_markdown = use_signal(String::new);
     let mut draft_slug = use_signal(|| "home".to_owned());
+    let mut selected_template_slug = use_signal(String::new);
+    let mut editor_is_new_page = use_signal(|| false);
     let mut selected_revision = use_signal(String::new);
     let mut refresh_key = use_signal(|| 0_u64);
     let mut status = use_signal(String::new);
@@ -94,6 +114,14 @@ fn App() -> Element {
     let mut pages_resource = use_resource(move || async move {
         let _ = refresh_key();
         list_wiki_pages().await
+    });
+    let mut templates_resource = use_resource(move || async move {
+        let _ = refresh_key();
+        list_page_templates().await
+    });
+    let mut markdown_components_resource = use_resource(move || async move {
+        let _ = refresh_key();
+        list_markdown_component_manifests().await
     });
     let mut page_resource = use_resource(move || async move {
         let _ = refresh_key();
@@ -126,6 +154,8 @@ fn App() -> Element {
     let user = user_resource().and_then(Result::ok).flatten();
     let auth_providers_state = auth_providers_resource();
     let pages_state = pages_resource();
+    let templates_state = templates_resource();
+    let markdown_components_state = markdown_components_resource();
     let page_state = page_resource();
     let history_state = history_resource();
     let users_state = users_resource();
@@ -177,13 +207,37 @@ fn App() -> Element {
                 draft_slug.set(page.slug);
                 editor_title.set(page.title);
                 editor_markdown.set(page.markdown);
+                editor_is_new_page.set(false);
             } else {
                 draft_slug.set(selected_slug());
                 editor_title.set(String::new());
                 editor_markdown.set(String::new());
+                editor_is_new_page.set(true);
             }
+            selected_template_slug.set(String::new());
             active_tab.set(ActiveTab::Edit);
             status.set(String::new());
+        }
+    };
+    let apply_template_action = move |_| async move {
+        let template_slug = selected_template_slug();
+        if template_slug.trim().is_empty() {
+            status.set("Choose a template.".to_owned());
+            return;
+        }
+
+        let normalized_slug = normalize_slug(&draft_slug())
+            .or_else(|| normalize_slug(&editor_title()))
+            .unwrap_or_else(|| template_slug.clone());
+
+        match apply_page_template(template_slug, normalized_slug.clone(), editor_title()).await {
+            Ok(draft) => {
+                draft_slug.set(normalized_slug);
+                editor_title.set(draft.title);
+                editor_markdown.set(draft.markdown);
+                status.set("Template applied.".to_owned());
+            }
+            Err(err) => status.set(format!("Template failed: {err}")),
         }
     };
     let new_managed_user = move |_| {
@@ -265,6 +319,8 @@ fn App() -> Element {
                             draft_slug.set(String::new());
                             editor_title.set(String::new());
                             editor_markdown.set(String::new());
+                            selected_template_slug.set(String::new());
+                            editor_is_new_page.set(true);
                             selected_revision.set(String::new());
                             active_tab.set(ActiveTab::Edit);
                             status.set(String::new());
@@ -279,6 +335,8 @@ fn App() -> Element {
                             user_access_resource.restart();
                             auth_providers_resource.restart();
                             pages_resource.restart();
+                            templates_resource.restart();
+                            markdown_components_resource.restart();
                             page_resource.restart();
                             history_resource.restart();
                             users_resource.restart();
@@ -361,14 +419,22 @@ fn App() -> Element {
 
                     match active_tab() {
                         ActiveTab::View => rsx! {
-                            PageView { page_state }
+                            PageView {
+                                page_state,
+                                component_manifests: markdown_component_manifests(&markdown_components_state)
+                            }
                         },
                         ActiveTab::Edit => rsx! {
                             PageEditor {
                                 user_is_authenticated,
                                 draft_slug,
+                                templates_enabled: editor_is_new_page(),
+                                templates_state,
+                                selected_template_slug,
+                                component_manifests: markdown_component_manifests(&markdown_components_state),
                                 editor_title,
                                 editor_markdown,
+                                on_apply_template: apply_template_action,
                                 on_cancel: move |_| active_tab.set(ActiveTab::View),
                                 on_save: move |_| async move {
                                     let Some(slug) = normalize_slug(&draft_slug()) else {
@@ -383,6 +449,7 @@ fn App() -> Element {
                                             draft_slug.set(saved.slug);
                                             editor_title.set(saved.title);
                                             editor_markdown.set(saved.markdown);
+                                            editor_is_new_page.set(false);
                                             selected_revision.set(String::new());
                                             active_tab.set(ActiveTab::View);
                                             refresh_key += 1;
@@ -511,11 +578,14 @@ fn PageNavButton(page: PageSummary, selected: String, on_select: EventHandler<St
 }
 
 #[component]
-fn PageView(page_state: Option<ServerFnResult<Option<PageDetail>>>) -> Element {
+fn PageView(
+    page_state: Option<ServerFnResult<Option<PageDetail>>>,
+    component_manifests: Vec<String>,
+) -> Element {
     rsx! {
         match page_state {
             Some(Ok(Some(page))) => {
-                let html = render_markdown(&page.markdown);
+                let html = render_markdown_with_component_manifests(&page.markdown, &component_manifests);
                 rsx! {
                     article {
                         class: "markdown rounded-lg border border-stone-200 bg-white p-5 shadow-sm md:p-8",
@@ -540,17 +610,69 @@ fn PageView(page_state: Option<ServerFnResult<Option<PageDetail>>>) -> Element {
 fn PageEditor(
     user_is_authenticated: bool,
     draft_slug: Signal<String>,
+    templates_enabled: bool,
+    templates_state: Option<ServerFnResult<Vec<PageTemplateSummary>>>,
+    selected_template_slug: Signal<String>,
+    component_manifests: Vec<String>,
     editor_title: Signal<String>,
     editor_markdown: Signal<String>,
+    on_apply_template: EventHandler<MouseEvent>,
     on_cancel: EventHandler<MouseEvent>,
     on_save: EventHandler<MouseEvent>,
 ) -> Element {
-    let preview_html = render_markdown(&compose_page_markdown(&editor_title(), &editor_markdown()));
+    let preview_html = render_markdown_with_component_manifests(
+        &compose_page_markdown(&editor_title(), &editor_markdown()),
+        &component_manifests,
+    );
+    let selected_template = selected_template_slug();
+    let template_select_disabled =
+        !matches!(&templates_state, Some(Ok(templates)) if !templates.is_empty());
+    let apply_template_disabled = selected_template.trim().is_empty();
 
     rsx! {
         div { class: "grid gap-4 lg:grid-cols-2",
             section { class: "rounded-lg border border-stone-200 bg-white p-5 shadow-sm",
                 div { class: "mb-4 grid gap-3",
+                    if templates_enabled {
+                        label { class: "grid gap-1 text-sm font-semibold text-slate-700",
+                            "Template"
+                            div { class: "flex flex-wrap gap-2",
+                                select {
+                                    class: "min-w-48 flex-1",
+                                    value: "{selected_template}",
+                                    disabled: template_select_disabled,
+                                    oninput: move |event| selected_template_slug.set(event.value()),
+                                    match templates_state {
+                                        Some(Ok(templates)) if templates.is_empty() => rsx! {
+                                            option { value: "", "No templates" }
+                                        },
+                                        Some(Ok(templates)) => rsx! {
+                                            option { value: "", "Blank page" }
+                                            for template in templates {
+                                                option {
+                                                    key: "{template.slug}",
+                                                    value: "{template.slug}",
+                                                    "{template.title}"
+                                                }
+                                            }
+                                        },
+                                        Some(Err(_)) => rsx! {
+                                            option { value: "", "Templates unavailable" }
+                                        },
+                                        None => rsx! {
+                                            option { value: "", "Loading templates" }
+                                        },
+                                    }
+                                }
+                                button {
+                                    class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400 disabled:cursor-not-allowed disabled:opacity-50",
+                                    disabled: apply_template_disabled,
+                                    onclick: move |event| on_apply_template.call(event),
+                                    "Use"
+                                }
+                            }
+                        }
+                    }
                     label { class: "grid gap-1 text-sm font-semibold text-slate-700",
                         "Slug"
                         input {
@@ -660,169 +782,6 @@ fn HistoryView(
 }
 
 #[component]
-fn UsersView(
-    users_state: Option<ServerFnResult<Vec<ManagedUser>>>,
-    can_manage_users: bool,
-    managed_user_id: Signal<String>,
-    managed_user_name: Signal<String>,
-    managed_user_email: Signal<String>,
-    managed_user_role: Signal<String>,
-    managed_user_locked: Signal<bool>,
-    on_new: EventHandler<MouseEvent>,
-    on_select: EventHandler<ManagedUser>,
-    on_save: EventHandler<MouseEvent>,
-    on_delete: EventHandler<String>,
-) -> Element {
-    let form_is_locked = managed_user_locked();
-    let save_disabled = !can_manage_users || form_is_locked || managed_user_id().trim().is_empty();
-
-    rsx! {
-        div { class: "grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]",
-            section { class: "rounded-lg border border-stone-200 bg-white p-4 shadow-sm",
-                div { class: "mb-3 flex flex-wrap items-center justify-between gap-2",
-                    h3 { class: "text-base font-semibold text-slate-950", "Managed Users" }
-                    button {
-                        class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
-                        onclick: move |event| on_new.call(event),
-                        "New User"
-                    }
-                }
-                div { class: "grid gap-2",
-                    match users_state {
-                        Some(Ok(users)) if users.is_empty() => rsx! {
-                            p { class: "py-6 text-sm text-slate-500", "No managed users" }
-                        },
-                        Some(Ok(users)) => rsx! {
-                            for managed_user in users {
-                                UserRow {
-                                    key: "{managed_user.id}",
-                                    managed_user,
-                                    active_id: managed_user_id(),
-                                    on_select,
-                                    on_delete,
-                                }
-                            }
-                        },
-                        Some(Err(err)) => rsx! {
-                            p { class: "rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800", "{err}" }
-                        },
-                        None => rsx! {
-                            p { class: "py-6 text-sm text-slate-500", "Loading users" }
-                        },
-                    }
-                }
-            }
-
-            section { class: "rounded-lg border border-stone-200 bg-white p-4 shadow-sm",
-                h3 { class: "mb-3 text-base font-semibold text-slate-950", "User Role" }
-                div { class: "grid gap-3",
-                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
-                        "User ID"
-                        input {
-                            value: "{managed_user_id}",
-                            disabled: form_is_locked,
-                            oninput: move |event| managed_user_id.set(event.value()),
-                            placeholder: "provider-user-id"
-                        }
-                    }
-                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
-                        "Name"
-                        input {
-                            value: "{managed_user_name}",
-                            disabled: form_is_locked,
-                            oninput: move |event| managed_user_name.set(event.value()),
-                            placeholder: "Display name"
-                        }
-                    }
-                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
-                        "Email"
-                        input {
-                            value: "{managed_user_email}",
-                            disabled: form_is_locked,
-                            oninput: move |event| managed_user_email.set(event.value()),
-                            placeholder: "user@example.com"
-                        }
-                    }
-                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
-                        "Role"
-                        select {
-                            value: "{managed_user_role}",
-                            disabled: form_is_locked,
-                            oninput: move |event| managed_user_role.set(event.value()),
-                            option { value: "viewer", "Viewer" }
-                            option { value: "editor", "Editor" }
-                            option { value: "admin", "Admin" }
-                            option { value: NO_ROLE_LABEL, "None" }
-                        }
-                    }
-                    if form_is_locked {
-                        p { class: "rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900", "This user is locked by .env role configuration." }
-                    }
-                    div { class: "flex flex-wrap gap-2",
-                        button {
-                            class: "inline-flex h-9 items-center rounded-md border border-emerald-700 bg-emerald-700 px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50",
-                            disabled: save_disabled,
-                            onclick: move |event| on_save.call(event),
-                            "Save User"
-                        }
-                        button {
-                            class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
-                            onclick: move |event| on_new.call(event),
-                            "Clear"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn UserRow(
-    managed_user: ManagedUser,
-    active_id: String,
-    on_select: EventHandler<ManagedUser>,
-    on_delete: EventHandler<String>,
-) -> Element {
-    let selected = managed_user.id == active_id;
-    let class = if selected {
-        "grid gap-3 rounded-md border border-emerald-700 bg-emerald-50 p-3 text-left sm:grid-cols-[minmax(0,1fr)_auto]"
-    } else {
-        "grid gap-3 rounded-md border border-stone-200 bg-white p-3 text-left hover:border-stone-300 sm:grid-cols-[minmax(0,1fr)_auto]"
-    };
-    let select_user = managed_user.clone();
-    let delete_id = managed_user.id.clone();
-    let email = managed_user
-        .email
-        .clone()
-        .unwrap_or_else(|| "No email".to_owned());
-
-    rsx! {
-        div { class,
-            button {
-                class: "min-w-0 text-left",
-                onclick: move |_| on_select.call(select_user.clone()),
-                span { class: "block truncate text-sm font-semibold text-slate-950", "{managed_user.name}" }
-                span { class: "block truncate text-xs text-slate-500", "{managed_user.id}" }
-                span { class: "block truncate text-xs text-slate-600", "{email}" }
-            }
-            div { class: "flex items-center gap-2 sm:justify-end",
-                span { class: "rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700", "{managed_user.role}" }
-                if managed_user.locked {
-                    span { class: "rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900", "Locked" }
-                } else {
-                    button {
-                        class: "inline-flex h-8 items-center rounded-md border border-red-200 bg-white px-2 text-xs font-semibold text-red-700 hover:border-red-300",
-                        onclick: move |_| on_delete.call(delete_id.clone()),
-                        "Delete"
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
 fn RevisionButton(
     revision: PageRevision,
     active_revision: String,
@@ -889,6 +848,35 @@ async fn current_user() -> ServerFnResult<Option<AuthUser>> {
     Ok(server::auth::current_user_from_headers(&headers))
 }
 
+#[cfg(feature = "server")]
+async fn media_handler(
+    dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
+) -> dioxus::server::axum::response::Response {
+    use dioxus::server::axum::{
+        http::{
+            header::{CACHE_CONTROL, CONTENT_TYPE},
+            HeaderValue, StatusCode,
+        },
+        response::IntoResponse,
+    };
+
+    match server::storage::read_media_file(&path) {
+        Ok(Some(file)) => {
+            let mut response = file.contents.into_response();
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(file.content_type));
+            response.headers_mut().insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300"),
+            );
+            response
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
 #[get("/api/session/access", headers: dioxus::fullstack::HeaderMap)]
 async fn current_user_access() -> ServerFnResult<UserAccess> {
     match server::auth::current_user_from_headers(&headers) {
@@ -913,6 +901,25 @@ async fn list_wiki_pages() -> ServerFnResult<Vec<PageSummary>> {
 #[get("/api/pages/{slug}")]
 async fn get_wiki_page(slug: String) -> ServerFnResult<Option<PageDetail>> {
     server::storage::read_page(&slug).map_err(server_error)
+}
+
+#[get("/api/templates")]
+async fn list_page_templates() -> ServerFnResult<Vec<PageTemplateSummary>> {
+    server::storage::list_templates().map_err(server_error)
+}
+
+#[get("/api/markdown-components")]
+async fn list_markdown_component_manifests() -> ServerFnResult<Vec<String>> {
+    server::storage::list_component_manifests().map_err(server_error)
+}
+
+#[post("/api/templates/apply")]
+async fn apply_page_template(
+    template_slug: String,
+    draft_slug: String,
+    title: String,
+) -> ServerFnResult<PageTemplateDraft> {
+    server::storage::page_template_draft(&template_slug, &draft_slug, &title).map_err(server_error)
 }
 
 #[post("/api/pages/save", headers: dioxus::fullstack::HeaderMap)]
@@ -947,35 +954,6 @@ async fn get_wiki_history(slug: String) -> ServerFnResult<Vec<PageRevision>> {
 #[get("/api/pages/{slug}/diff/{revision}")]
 async fn get_wiki_diff(slug: String, revision: String) -> ServerFnResult<PageDiff> {
     server::storage::page_diff(&slug, &revision).map_err(server_error)
-}
-
-#[get("/api/users", headers: dioxus::fullstack::HeaderMap)]
-async fn list_managed_users() -> ServerFnResult<Vec<ManagedUser>> {
-    let user = authenticated_user_from_headers(&headers)?;
-    server::roles::list_managed_users(&user).map_err(role_server_error)
-}
-
-#[post("/api/users/save", headers: dioxus::fullstack::HeaderMap)]
-async fn save_managed_user(input: ManagedUserInput) -> ServerFnResult<ManagedUser> {
-    let user = authenticated_user_from_headers(&headers)?;
-    server::roles::save_managed_user(&user, input).map_err(role_server_error)
-}
-
-#[post("/api/users/delete", headers: dioxus::fullstack::HeaderMap)]
-async fn delete_managed_user(id: String) -> ServerFnResult<()> {
-    let user = authenticated_user_from_headers(&headers)?;
-    server::roles::delete_managed_user(&user, &id).map_err(role_server_error)
-}
-
-#[cfg(feature = "server")]
-fn authenticated_user_from_headers(
-    headers: &dioxus::fullstack::HeaderMap,
-) -> ServerFnResult<AuthUser> {
-    server::auth::current_user_from_headers(headers).ok_or_else(|| ServerFnError::ServerError {
-        message: "sign in required".to_owned(),
-        code: 401,
-        details: None,
-    })
 }
 
 #[cfg(feature = "server")]

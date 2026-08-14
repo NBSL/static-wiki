@@ -1,0 +1,89 @@
+{
+  "name": "Item card",
+  "fence": "item-card",
+  "aliases": ["item_card", "item", "itembox", "item-box"],
+  "wrapper_tag": "figure",
+  "wrapper_class": "item-card",
+  "aria_label": "Item card",
+  "layout": [
+    { "type": "field", "field": "title" },
+    {
+      "type": "container",
+      "tag": "div",
+      "class": "item-card-content",
+      "children": [
+        {
+          "type": "container",
+          "tag": "div",
+          "class": "item-card-icon",
+          "children": [
+            { "type": "field", "field": "icon" }
+          ]
+        },
+        {
+          "type": "container",
+          "tag": "div",
+          "class": "item-card-details",
+          "children": [
+            { "type": "remaining_fields" }
+          ]
+        }
+      ]
+    }
+  ],
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "figcaption",
+      "class": "item-card-title"
+    },
+    {
+      "key": "icon",
+      "type": "class_marker",
+      "tag": "span",
+      "class": "item-card-icon-art",
+      "class_prefix": "item-card-icon-",
+      "default": "necklace",
+      "aria_hidden": true
+    },
+    {
+      "key": "tags",
+      "aliases": ["tag", "kind", "type", "rarity"],
+      "type": "list",
+      "split": ",|",
+      "wrapper_tag": "div",
+      "wrapper_class": "item-card-tags",
+      "item_tag": "span",
+      "repeatable": true
+    },
+    {
+      "key": "description",
+      "aliases": ["desc", "flavor"],
+      "type": "text",
+      "tag": "p",
+      "class": "item-card-description",
+      "repeatable": true
+    },
+    {
+      "key": "line",
+      "type": "key_value_list",
+      "split": "|",
+      "wrapper_tag": "div",
+      "wrapper_class": "item-card-line",
+      "pair_class": "item-card-pair",
+      "label_class": "item-card-label",
+      "value_class": "item-card-value",
+      "repeatable": true
+    }
+  ],
+  "unknown_fields": {
+    "type": "key_value_lines",
+    "wrapper_tag": "div",
+    "class": "item-card-line",
+    "pair_class": "item-card-pair",
+    "label_class": "item-card-label",
+    "value_class": "item-card-value"
+  }
+}

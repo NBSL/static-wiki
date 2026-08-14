@@ -1,5 +1,5 @@
-use crate::models::{AuthProviderInfo, AuthUser};
 use crate::server::env::{load_dotenv, optional_env};
+use crate::{models::AuthProviderInfo, user::AuthUser};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use dioxus::server::axum::{
     extract::{Path, Query},
@@ -15,20 +15,28 @@ use oauth2::{
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    path::{Path as FsPath, PathBuf},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "xp_wiki_session";
 const PENDING_LOGIN_COOKIE: &str = "xp_wiki_oauth_pending";
 const PENDING_LOGIN_MAX_AGE_SECONDS: u16 = 600;
+const SESSION_MAX_AGE_SECONDS: u64 = 2_592_000;
+const SESSION_FILE_ENV: &str = "XP_WIKI_SESSION_FILE";
+const DEFAULT_SESSION_FILE: &str = "wiki-data/sessions.json";
 const UI_URL_ENV: &str = "XP_WIKI_UI_URL";
 const DEFAULT_UI_REDIRECT_URL: &str = "/";
 
 static PENDING_LOGINS: Lazy<Mutex<HashMap<String, PendingLogin>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static SESSIONS: Lazy<Mutex<HashMap<String, AuthUser>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static SESSION_STORE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Clone, Deserialize, Serialize)]
 struct PendingLogin {
@@ -40,6 +48,17 @@ struct PendingLogin {
 struct OAuthLogin {
     auth_url: String,
     pending_login: PendingLogin,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct SessionRecord {
+    user: AuthUser,
+    expires_at: u64,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct SessionStore {
+    sessions: BTreeMap<String, SessionRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +99,8 @@ pub enum AuthError {
     UserInfo(String),
     #[error("authentication state lock was poisoned")]
     Lock,
+    #[error("session store operation failed: {0}")]
+    SessionStore(String),
     #[error("unknown OAuth provider `{0}`")]
     UnknownProvider(String),
     #[error("OAuth callback provider did not match login provider")]
@@ -132,16 +153,17 @@ pub async fn callback_handler(
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
             }
 
-            let session_id = Uuid::new_v4().to_string();
-            let Ok(mut sessions) = SESSIONS.lock() else {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "session lock failed");
+            let session_id = match create_session(user) {
+                Ok(session_id) => session_id,
+                Err(err) => {
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
+                }
             };
-            sessions.insert(session_id.clone(), user);
 
             let ui_url = post_login_redirect_url();
             let mut response = redirect_response(&ui_url);
             let cookie = format!(
-                "{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+                "{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_MAX_AGE_SECONDS}"
             );
             append_set_cookie(&mut response, cookie);
             response
@@ -154,9 +176,7 @@ pub async fn callback_handler(
 
 pub async fn logout_handler(headers: HeaderMap) -> Response {
     if let Some(session_id) = session_id_from_headers(&headers) {
-        if let Ok(mut sessions) = SESSIONS.lock() {
-            sessions.remove(&session_id);
-        }
+        let _ = remove_session(&session_id);
     }
 
     let mut response = redirect_response("/");
@@ -167,7 +187,7 @@ pub async fn logout_handler(headers: HeaderMap) -> Response {
 
 pub fn current_user_from_headers(headers: &HeaderMap) -> Option<AuthUser> {
     let session_id = session_id_from_headers(headers)?;
-    SESSIONS.lock().ok()?.get(&session_id).cloned()
+    session_user(&session_id).ok().flatten()
 }
 
 pub fn configured_providers() -> Vec<AuthProviderInfo> {
@@ -451,6 +471,100 @@ fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
     cookie_value_from_headers(headers, SESSION_COOKIE)
 }
 
+fn create_session(user: AuthUser) -> Result<String, AuthError> {
+    let session_id = Uuid::new_v4().to_string();
+    let now = now_unix_seconds();
+    let record = SessionRecord {
+        user,
+        expires_at: now.saturating_add(SESSION_MAX_AGE_SECONDS),
+    };
+    let _guard = SESSION_STORE_LOCK.lock().map_err(|_| AuthError::Lock)?;
+    let path = session_file_path();
+    let mut store = load_session_store(&path)?;
+    store.prune_expired(now);
+    store.sessions.insert(session_id.clone(), record);
+    save_session_store(&path, &store)?;
+    Ok(session_id)
+}
+
+fn session_user(session_id: &str) -> Result<Option<AuthUser>, AuthError> {
+    let now = now_unix_seconds();
+    let _guard = SESSION_STORE_LOCK.lock().map_err(|_| AuthError::Lock)?;
+    let path = session_file_path();
+    let mut store = load_session_store(&path)?;
+    let pruned = store.prune_expired(now);
+    let user = store
+        .sessions
+        .get(session_id)
+        .map(|record| record.user.clone());
+
+    if pruned {
+        save_session_store(&path, &store)?;
+    }
+
+    Ok(user)
+}
+
+fn remove_session(session_id: &str) -> Result<(), AuthError> {
+    let now = now_unix_seconds();
+    let _guard = SESSION_STORE_LOCK.lock().map_err(|_| AuthError::Lock)?;
+    let path = session_file_path();
+    let mut store = load_session_store(&path)?;
+    let pruned = store.prune_expired(now);
+    let removed = store.sessions.remove(session_id).is_some();
+
+    if pruned || removed {
+        save_session_store(&path, &store)?;
+    }
+
+    Ok(())
+}
+
+impl SessionStore {
+    fn prune_expired(&mut self, now: u64) -> bool {
+        let previous_len = self.sessions.len();
+        self.sessions.retain(|_, record| record.expires_at > now);
+        self.sessions.len() != previous_len
+    }
+}
+
+fn session_file_path() -> PathBuf {
+    optional_env(SESSION_FILE_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SESSION_FILE))
+}
+
+fn load_session_store(path: &FsPath) -> Result<SessionStore, AuthError> {
+    match fs::read(path) {
+        Ok(contents) if contents.is_empty() => Ok(SessionStore::default()),
+        Ok(contents) => serde_json::from_slice(&contents).map_err(session_store_error),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SessionStore::default()),
+        Err(err) => Err(session_store_error(err)),
+    }
+}
+
+fn save_session_store(path: &FsPath, store: &SessionStore) -> Result<(), AuthError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(session_store_error)?;
+    }
+
+    let json = serde_json::to_vec_pretty(store).map_err(session_store_error)?;
+    fs::write(path, json).map_err(session_store_error)
+}
+
+fn session_store_error(err: impl ToString) -> AuthError {
+    AuthError::SessionStore(err.to_string())
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 fn take_pending_login(state: &str) -> Result<Option<PendingLogin>, AuthError> {
     Ok(PENDING_LOGINS
         .lock()
@@ -530,6 +644,8 @@ mod tests {
     use std::{ffi::OsString, fs};
     use tempfile::tempdir;
 
+    static TEST_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<OsString>,
@@ -556,6 +672,7 @@ mod tests {
 
     #[test]
     fn configured_providers_should_include_discord_from_configured_env_file() {
+        let _env_lock = TEST_ENV_LOCK.lock().expect("test env lock should work");
         let dir = tempdir().expect("temp dir should be created");
         let env_path = dir.path().join(".env");
         fs::write(
@@ -570,6 +687,41 @@ mod tests {
         assert!(providers
             .iter()
             .any(|provider| provider.slug == "discord" && provider.label == "Discord"));
+    }
+
+    #[test]
+    fn current_user_from_headers_should_read_persisted_session_cookie() {
+        let _env_lock = TEST_ENV_LOCK.lock().expect("test env lock should work");
+        let dir = tempdir().expect("temp dir should be created");
+        let session_path = dir.path().join("sessions.json");
+        let _session_file = EnvVarGuard::set(SESSION_FILE_ENV, &session_path);
+        let user = test_user();
+
+        let session_id = create_session(user.clone()).expect("session should be created");
+        let headers = session_cookie_headers(&session_id);
+
+        assert_eq!(current_user_from_headers(&headers), Some(user));
+    }
+
+    #[test]
+    fn current_user_from_headers_should_ignore_expired_session_cookie() {
+        let _env_lock = TEST_ENV_LOCK.lock().expect("test env lock should work");
+        let dir = tempdir().expect("temp dir should be created");
+        let session_path = dir.path().join("sessions.json");
+        let _session_file = EnvVarGuard::set(SESSION_FILE_ENV, &session_path);
+        let session_id = "expired-session";
+        let mut store = SessionStore::default();
+        store.sessions.insert(
+            session_id.to_owned(),
+            SessionRecord {
+                user: test_user(),
+                expires_at: now_unix_seconds().saturating_sub(1),
+            },
+        );
+        save_session_store(&session_path, &store).expect("session store should be written");
+        let headers = session_cookie_headers(session_id);
+
+        assert_eq!(current_user_from_headers(&headers), None);
     }
 
     #[test]
@@ -611,5 +763,23 @@ mod tests {
         let url = ui_redirect_url(Some(" http://127.0.0.1:3000/app "));
 
         assert_eq!(url, "http://127.0.0.1:3000/app");
+    }
+
+    fn session_cookie_headers(session_id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={session_id}"))
+                .expect("cookie value should be valid"),
+        );
+        headers
+    }
+
+    fn test_user() -> AuthUser {
+        AuthUser {
+            id: "discord-user-1".to_owned(),
+            name: "Discord User".to_owned(),
+            email: Some("discord@example.invalid".to_owned()),
+        }
     }
 }

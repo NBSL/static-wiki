@@ -1,5 +1,5 @@
-use crate::models::{AuthUser, ManagedUser, ManagedUserInput, UserAccess};
 use crate::server::env::{load_dotenv, optional_env};
+use crate::user::{AuthUser, ManagedUser, ManagedUserInput, UserAccess};
 use once_cell::sync::Lazy;
 use role_system::{
     storage::FileStorage, Permission, Resource, Role, RoleSystem, RoleSystemConfig, Subject,

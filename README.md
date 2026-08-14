@@ -19,6 +19,93 @@ cp .env.example .env
 The app supports GitHub, Google, and Discord. Configure whichever provider credentials you want enabled in `.env`; the UI only shows login options for providers that have both client ID and client secret set.
 The server loads `.env` from the project root by default. Set `XP_WIKI_ENV_FILE=/absolute/path/to/.env` before starting the server if you want to use a different file.
 Set `XP_WIKI_UI_URL` when the OAuth server should send the browser to a UI hosted at a different URL after a successful login. If it is unset, the server redirects to `/`.
+Use the same host in the browser and OAuth callback URL, for example `127.0.0.1` everywhere or `localhost` everywhere. Browsers do not share cookies between those hostnames.
+Login sessions are stored in `XP_WIKI_SESSION_FILE`, defaulting to `wiki-data/sessions.json`, so OAuth login cookies survive server restarts until they expire.
+
+Page templates are Markdown files in `wiki-data/templates`. The first `# Heading` is used as the template name in the editor, and the remaining Markdown is copied into new page drafts. Templates can include `{{title}}` and `{{slug}}` placeholders, which are replaced when an editor applies the template.
+
+Pages can include a MediaWiki-style infobox with a fenced `infobox` block. The `infocard` and `info-card` aliases work too. Values are escaped when rendered, so editors should write plain text rather than HTML:
+
+````markdown
+```infobox
+title: Nikola Tesla
+image: tesla.jpeg
+caption: Tesla around 1890
+Born: 10 July 1856
+Known for: AC power
+```
+````
+
+For local wiki media, put image files in `wiki-data/media` or the repo-level `media` folder and use `image: filename.ext`. The `/media` route looks in those folders first and then in the app `assets` directory, so existing bundled images can use the same filename style. You can also use an `https://` URL.
+
+Pages can include a table of contents with a fenced `toc` block. It adds heading anchors automatically and includes `##` through `######` headings by default:
+
+````markdown
+```toc
+title: Contents
+min-depth: 2
+max-depth: 4
+ordered: false
+```
+````
+
+Use `title: false` to hide the title. `ordered: true` renders a numbered list.
+
+Markdown components can also be declared as static JSON plugin manifests in `wiki-data/components`. The server seeds `callout.json`, `infobox.json`, and `item-card.json`, and the browser loads these manifests so page view and editor preview render the same component set. Built-in manifests live under `src/markdown_components/declarative` as fallbacks for static builds.
+
+Example `wiki-data/components/callout.json` manifest:
+
+```json
+{
+  "name": "Callout",
+  "fence": "callout",
+  "aliases": ["note"],
+  "wrapper_tag": "aside",
+  "wrapper_class": "callout",
+  "aria_label": "Callout",
+  "fields": [
+    { "key": "title", "type": "text", "tag": "div", "class": "callout-title" },
+    { "key": "body", "aliases": ["text"], "type": "text", "tag": "p", "class": "callout-body", "repeatable": true },
+    { "key": "items", "type": "list", "split": "|", "wrapper_tag": "ul", "wrapper_class": "callout-list", "item_tag": "li" }
+  ],
+  "unknown_fields": {
+    "class": "markdown-component-fields",
+    "row_class": "markdown-component-row",
+    "label_class": "markdown-component-label",
+    "value_class": "markdown-component-value"
+  }
+}
+```
+
+Editors can use that component in Markdown:
+
+````markdown
+```callout
+title: Note
+body: This component is declared with JSON rather than Rust.
+items: Static | Safe | Reusable
+Status: Draft
+```
+````
+
+Declarative fields support `text`, `image`, `list`, `key_value_list`, and `class_marker`. Manifests can also define a safe `layout` with `container`, `field`, and `remaining_fields` nodes for nested component markup. Text is escaped, image paths are restricted to safe local media paths or `http(s)` URLs, and manifest tags/classes are sanitized before rendering.
+
+Pages can also include RPG-style item panels with a fenced `item-card` block. The `item`, `itembox`, and `item-box` aliases work too:
+
+````markdown
+```item-card
+title: Amulet of Loyalty
+icon: necklace
+tags: MAGIC, UNIQUE
+line: Slot: NECK
+line: INT: +5 | WIS: +5
+line: Mana: +30
+description: A simple pendant carrying Lady Elana's final vow, clasped from Roon Torvald's lifeless chest.
+line: Weight: 0.1 | Size: SMALL
+line: Class: ALL
+line: Race: ALL
+```
+````
 
 Roles are managed with `role-system` using its filesystem backend at `XP_WIKI_ROLE_FILE`. The app bootstraps `admin`, `editor`, and `viewer` roles there. Authenticated users are tracked in `XP_WIKI_USER_FILE`, and admins can assign `admin`, `editor`, `viewer`, or `none` from the Users tab.
 

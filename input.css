@@ -84,6 +84,294 @@
         @apply border border-stone-300 px-3 py-2 text-left;
     }
 
+    .markdown .callout {
+        @apply my-5 overflow-hidden rounded-md border border-emerald-200 bg-emerald-50 text-sm leading-6 text-slate-800 shadow-sm;
+    }
+
+    .markdown .callout-title {
+        @apply border-b border-emerald-200 bg-emerald-100 px-4 py-2 font-semibold text-emerald-950;
+    }
+
+    .markdown .callout-image {
+        @apply w-full border-b border-emerald-200 bg-white;
+    }
+
+    .markdown .callout-body {
+        @apply my-0 px-4 py-3;
+    }
+
+    .markdown .callout-list {
+        @apply m-0 list-disc px-8 py-3;
+    }
+
+    .markdown .markdown-component-fields {
+        @apply m-0 border-t border-emerald-200;
+    }
+
+    .markdown .markdown-component-row {
+        @apply grid border-t border-emerald-100;
+        grid-template-columns: minmax(7rem, 34%) minmax(0, 1fr);
+    }
+
+    .markdown .markdown-component-row:first-child {
+        @apply border-t-0;
+    }
+
+    .markdown .markdown-component-label {
+        @apply bg-emerald-100/60 px-3 py-2 font-semibold text-emerald-950;
+    }
+
+    .markdown .markdown-component-value {
+        @apply px-3 py-2 text-slate-800;
+        overflow-wrap: anywhere;
+    }
+
+    .markdown .toc {
+        @apply my-5 max-w-80 overflow-hidden rounded-md border border-stone-300 bg-white text-sm leading-6 shadow-sm;
+    }
+
+    .markdown .toc-title {
+        @apply border-b border-stone-200 bg-stone-50 px-4 py-2 font-semibold text-slate-950;
+    }
+
+    .markdown .toc-list {
+        @apply m-0 py-3 pr-4;
+    }
+
+    .markdown .toc-list-unordered {
+        @apply list-none pl-4;
+    }
+
+    .markdown .toc-list-ordered {
+        @apply list-decimal pl-8;
+    }
+
+    .markdown .toc-item {
+        @apply my-1;
+    }
+
+    .markdown .toc-depth-1 {
+        margin-left: 0.9rem;
+    }
+
+    .markdown .toc-depth-2 {
+        margin-left: 1.8rem;
+    }
+
+    .markdown .toc-depth-3 {
+        margin-left: 2.7rem;
+    }
+
+    .markdown .toc-depth-4 {
+        margin-left: 3.6rem;
+    }
+
+    .markdown .toc-depth-5 {
+        margin-left: 4.5rem;
+    }
+
+    .markdown .toc a {
+        @apply text-slate-700 underline-offset-2 transition hover:text-emerald-800 hover:underline;
+    }
+
+    .markdown .infobox {
+        @apply mb-4 overflow-hidden rounded-lg border border-stone-300 bg-white text-sm leading-6 shadow-sm;
+        clear: right;
+        float: right;
+        margin-left: 1.5rem;
+        width: min(100%, 18rem);
+    }
+
+    .markdown .infobox-title {
+        /*@apply border-b border-stone-200 bg-stone-50 px-4 py-3 text-base font-bold text-slate-950;*/
+    }
+
+    .markdown .infobox-image {
+        /*@apply w-full border-b border-stone-200 bg-stone-50;*/
+    }
+
+    .markdown .infobox-caption {
+        /*@apply border-b border-stone-200 bg-stone-50 px-4 py-2 text-xs text-slate-600;*/
+    }
+
+    .markdown .infobox-fields {
+        @apply m-0;
+    }
+
+    .markdown .infobox-row {
+        /*@apply grid border-t border-stone-200;*/
+        /*grid-template-columns: minmax(6.5rem, 38%) minmax(0, 1fr);*/
+    }
+
+    .markdown .infobox-row:first-child {
+        @apply border-t-0;
+    }
+
+    .markdown .infobox dt {
+        @apply bg-stone-50 px-3 py-2 font-semibold text-slate-700;
+    }
+
+    .markdown .infobox dd {
+        @apply px-3 py-2 text-slate-900;
+        overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 48rem) {
+        .markdown .infobox {
+            float: none;
+            margin-left: 0;
+            width: 100%;
+        }
+    }
+
+    .markdown .item-card {
+        position: relative;
+        margin: 1.5rem 0;
+        max-width: 54rem;
+        overflow: hidden;
+        color: #f8f8f1;
+        background-image: url(/media/itembox.png);
+        background-repeat: no-repeat;
+        background-size: 720px 370px;
+        font-family: Georgia, "Times New Roman", serif;
+    }
+
+    .markdown .item-card::before {
+        content: "";
+        position: absolute;
+        pointer-events: none;
+    }
+
+    .markdown .item-card::after {
+        content: "";
+        position: absolute;
+        inset: 0.55rem;
+        opacity: 0.8;
+        pointer-events: none;
+    }
+
+    .markdown .item-card-title,
+    .markdown .item-card-content {
+        position: relative;
+        z-index: 1;
+    }
+
+    .markdown .item-card-title {
+        margin: 0.45rem 3rem 0rem;
+        font-size: 2rem;
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: 0;
+        text-transform: uppercase;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.78);
+    }
+
+    .markdown .item-card-content {
+        display: grid;
+        grid-template-columns: 5rem minmax(0, 1fr);
+        gap: 1.1rem;
+        padding: 1.1rem 1.45rem 1rem;
+        min-height: 18rem;
+    }
+
+    .markdown .item-card-icon {
+        min-width: 0;
+        padding-top: 0.3rem;
+    }
+
+    .markdown .item-card-icon-art {
+        position: relative;
+        display: block;
+        width: 4.25rem;
+        height: 4.9rem;
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.75));
+    }
+
+    .markdown .item-card-icon-art::before {
+        content: "";
+        position: absolute;
+        left: 0.2rem;
+        top: 0.1rem;
+        width: 3.45rem;
+        height: 2.85rem;
+        border: 2px solid rgba(104, 78, 24, 0.95);
+        border-top-color: rgba(148, 111, 33, 0.55);
+        border-radius: 54% 46% 48% 52%;
+        transform: rotate(-15deg);
+    }
+
+    .markdown .item-card-icon-art::after {
+        content: "";
+        position: absolute;
+        left: 2.55rem;
+        top: 3.05rem;
+        width: 0.95rem;
+        height: 1.05rem;
+        border: 2px solid #9b780f;
+        border-radius: 50%;
+        background:
+            radial-gradient(circle at 48% 45%, #1017a4 0 34%, #06083b 37% 57%, #bb941a 61% 100%);
+        box-shadow: 0 -0.4rem 0 -0.28rem #9b780f;
+    }
+
+    .markdown .item-card-icon-generic::before {
+        border-radius: 50%;
+        transform: none;
+    }
+
+    .markdown .item-card-details {
+        min-width: 0;
+        font-size: 1.35rem;
+        line-height: 1.36;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.78);
+    }
+
+    .markdown .item-card-tags,
+    .markdown .item-card-line {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 2rem;
+        row-gap: 0.15rem;
+    }
+
+    .markdown .item-card-tags {
+        margin-bottom: 0.2rem;
+        text-transform: uppercase;
+    }
+
+    .markdown .item-card-pair {
+        display: inline-flex;
+        gap: 0.35rem;
+        min-width: fit-content;
+    }
+
+    .markdown .item-card-label::after {
+        content: ":";
+    }
+
+    .markdown .item-card-description {
+        margin: 1.1rem 0 0.25rem;
+        max-width: 42rem;
+    }
+
+    @media (max-width: 48rem) {
+        .markdown .item-card-title {
+            margin-inline: 1rem;
+            font-size: 1.65rem;
+        }
+
+        .markdown .item-card-content {
+            grid-template-columns: 1fr;
+            gap: 0.5rem;
+            padding: 1rem;
+        }
+
+        .markdown .item-card-details {
+            font-size: 1.1rem;
+        }
+    }
+
     .diff-line {
         @apply grid min-h-7 grid-cols-[58px_58px_minmax(0,1fr)] whitespace-pre-wrap font-mono text-sm;
     }

@@ -1,14 +1,27 @@
+use markdown_it::MarkdownIt;
 use std::sync::OnceLock;
 
 pub fn render_markdown(markdown: &str) -> String {
     parser().parse(markdown).render()
 }
 
-fn parser() -> &'static markdown_it::MarkdownIt {
-    static PARSER: OnceLock<markdown_it::MarkdownIt> = OnceLock::new();
+pub fn render_markdown_with_component_manifests(markdown: &str, manifests: &[String]) -> String {
+    if manifests.is_empty() {
+        return render_markdown(markdown);
+    }
+
+    let mut parser = MarkdownIt::new();
+    markdown_it::plugins::cmark::add(&mut parser);
+    crate::markdown_components::add_rules_with_manifests(&mut parser, manifests);
+    parser.parse(markdown).render()
+}
+
+fn parser() -> &'static MarkdownIt {
+    static PARSER: OnceLock<MarkdownIt> = OnceLock::new();
     PARSER.get_or_init(|| {
-        let mut parser = markdown_it::MarkdownIt::new();
+        let mut parser = MarkdownIt::new();
         markdown_it::plugins::cmark::add(&mut parser);
+        crate::markdown_components::add_rules(&mut parser);
         parser
     })
 }

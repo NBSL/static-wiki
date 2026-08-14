@@ -1,0 +1,46 @@
+{
+  "name": "Callout",
+  "fence": "callout",
+  "aliases": ["note"],
+  "wrapper_tag": "aside",
+  "wrapper_class": "callout",
+  "aria_label": "Callout",
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "div",
+      "class": "callout-title"
+    },
+    {
+      "key": "image",
+      "type": "image",
+      "class": "callout-image",
+      "alt_from": "alt"
+    },
+    {
+      "key": "body",
+      "aliases": ["text", "description"],
+      "type": "text",
+      "tag": "p",
+      "class": "callout-body",
+      "repeatable": true
+    },
+    {
+      "key": "items",
+      "aliases": ["list"],
+      "type": "list",
+      "split": "|",
+      "wrapper_tag": "ul",
+      "wrapper_class": "callout-list",
+      "item_tag": "li"
+    }
+  ],
+  "unknown_fields": {
+    "class": "markdown-component-fields",
+    "row_class": "markdown-component-row",
+    "label_class": "markdown-component-label",
+    "value_class": "markdown-component-value"
+  }
+}

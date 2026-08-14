@@ -1,39 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct AuthUser {
-    pub id: String,
-    pub name: String,
-    pub email: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AuthProviderInfo {
     pub slug: String,
     pub label: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct UserAccess {
-    pub role: Option<String>,
-    pub can_manage_users: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ManagedUser {
-    pub id: String,
-    pub name: String,
-    pub email: Option<String>,
-    pub role: String,
-    pub locked: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ManagedUserInput {
-    pub id: String,
-    pub name: String,
-    pub email: Option<String>,
-    pub role: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -51,6 +21,19 @@ pub struct PageDetail {
     pub markdown: String,
     pub updated_at: Option<i64>,
     pub updated_by: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PageTemplateSummary {
+    pub slug: String,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct PageTemplateDraft {
+    pub template_slug: String,
+    pub title: String,
+    pub markdown: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

@@ -1,0 +1,34 @@
+{
+  "name": "Infobox",
+  "fence": "infobox",
+  "aliases": ["infocard", "info-card"],
+  "wrapper_tag": "aside",
+  "wrapper_class": "infobox",
+  "aria_label": "Infobox",
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "div",
+      "class": "infobox-title"
+    },
+    {
+      "key": "image",
+      "type": "image",
+      "class": "infobox-image",
+      "alt_from": "alt"
+    },
+    {
+      "key": "caption",
+      "aliases": ["image_caption"],
+      "type": "text",
+      "tag": "div",
+      "class": "infobox-caption"
+    }
+  ],
+  "unknown_fields": {
+    "class": "infobox-fields",
+    "row_class": "infobox-row"
+  }
+}
