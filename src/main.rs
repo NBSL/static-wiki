@@ -1,5 +1,7 @@
+mod builder;
 mod markdown;
 mod markdown_components;
+mod media;
 mod models;
 mod slug;
 mod user;
@@ -7,8 +9,10 @@ mod user;
 #[cfg(feature = "server")]
 mod server;
 
+use builder::{EditorMode, ModeButton, PageBuilder};
 use dioxus::prelude::*;
 use markdown::{compose_page_markdown, render_markdown_with_component_manifests};
+use media::{list_media_entries, MediaManager};
 use models::{
     AuthProviderInfo, DiffLineKind, PageDetail, PageDiff, PageRevision, PageSummary,
     PageTemplateDraft, PageTemplateSummary,
@@ -26,6 +30,7 @@ enum ActiveTab {
     View,
     Edit,
     History,
+    Media,
     Users,
 }
 
@@ -98,6 +103,8 @@ fn App() -> Element {
     let mut managed_user_email = use_signal(String::new);
     let mut managed_user_role = use_signal(|| "viewer".to_owned());
     let mut managed_user_locked = use_signal(|| false);
+    let media_path = use_signal(String::new);
+    let new_media_folder_name = use_signal(String::new);
 
     let mut user_resource = use_resource(move || async move {
         let _ = refresh_key();
@@ -122,6 +129,11 @@ fn App() -> Element {
     let mut markdown_components_resource = use_resource(move || async move {
         let _ = refresh_key();
         list_markdown_component_manifests().await
+    });
+    let mut media_resource = use_resource(move || async move {
+        let _ = refresh_key();
+        let path = media_path();
+        list_media_entries(path).await
     });
     let mut page_resource = use_resource(move || async move {
         let _ = refresh_key();
@@ -156,6 +168,7 @@ fn App() -> Element {
     let pages_state = pages_resource();
     let templates_state = templates_resource();
     let markdown_components_state = markdown_components_resource();
+    let media_state = media_resource();
     let page_state = page_resource();
     let history_state = history_resource();
     let users_state = users_resource();
@@ -168,6 +181,7 @@ fn App() -> Element {
         .as_ref()
         .and_then(|access| access.role.clone())
         .unwrap_or_else(|| NO_ROLE_LABEL.to_owned());
+    let can_manage_media = matches!(current_user_role.as_str(), "admin" | "editor");
     let user_is_authenticated = user.is_some();
     let current_page = page_state
         .as_ref()
@@ -175,18 +189,25 @@ fn App() -> Element {
         .and_then(Clone::clone);
     let selected = selected_slug();
     let active = active_tab();
-    let header_title = if active == ActiveTab::Users {
-        "Users".to_owned()
-    } else {
-        current_page
+    let header_title = match active {
+        ActiveTab::Users => "Users".to_owned(),
+        ActiveTab::Media => "Media".to_owned(),
+        _ => current_page
             .as_ref()
             .map(|page| page.title.clone())
-            .unwrap_or_else(|| "New page".to_owned())
+            .unwrap_or_else(|| "New page".to_owned()),
     };
-    let header_context = if active == ActiveTab::Users {
-        format!("Role: {current_user_role}")
-    } else {
-        selected.clone()
+    let header_context = match active {
+        ActiveTab::Users => format!("Role: {current_user_role}"),
+        ActiveTab::Media => {
+            let path = media_path();
+            if path.is_empty() {
+                "Media root".to_owned()
+            } else {
+                format!("Media / {path}")
+            }
+        }
+        _ => selected.clone(),
     };
     let auth_provider_error = auth_providers_state
         .as_ref()
@@ -304,6 +325,7 @@ fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
+        // document::Stylesheet { href: "https://cdn.jsdelivr.net/npm/tacit-css@1.9.7/dist/tacit-css.min.css"}
         div { class: "min-h-screen bg-stone-50 text-slate-900 md:grid md:grid-cols-[minmax(220px,300px)_minmax(0,1fr)]",
             aside { class: "border-b border-stone-200 bg-white/70 px-5 py-5 md:min-h-screen md:border-b-0 md:border-r",
                 div { class: "mb-5",
@@ -337,6 +359,7 @@ fn App() -> Element {
                             pages_resource.restart();
                             templates_resource.restart();
                             markdown_components_resource.restart();
+                            media_resource.restart();
                             page_resource.restart();
                             history_resource.restart();
                             users_resource.restart();
@@ -385,6 +408,14 @@ fn App() -> Element {
                     div { class: "flex flex-wrap items-center gap-2",
                         TabButton { label: "View", active: active_tab() == ActiveTab::View, onclick: move |_| active_tab.set(ActiveTab::View) }
                         TabButton { label: "History", active: active_tab() == ActiveTab::History, onclick: move |_| active_tab.set(ActiveTab::History) }
+                        TabButton {
+                            label: "Media",
+                            active: active_tab() == ActiveTab::Media,
+                            onclick: move |_| {
+                                active_tab.set(ActiveTab::Media);
+                                media_resource.restart();
+                            }
+                        }
                         if can_manage_users {
                             TabButton {
                                 label: "Users",
@@ -469,6 +500,16 @@ fn App() -> Element {
                                 history_state,
                                 diff_state,
                                 selected_revision,
+                            }
+                        },
+                        ActiveTab::Media => rsx! {
+                            MediaManager {
+                                media_state,
+                                media_path,
+                                new_folder_name: new_media_folder_name,
+                                can_manage_media,
+                                refresh_key,
+                                status,
                             }
                         },
                         ActiveTab::Users => rsx! {
@@ -620,6 +661,7 @@ fn PageEditor(
     on_cancel: EventHandler<MouseEvent>,
     on_save: EventHandler<MouseEvent>,
 ) -> Element {
+    let mut editor_mode = use_signal(|| EditorMode::Builder);
     let preview_html = render_markdown_with_component_manifests(
         &compose_page_markdown(&editor_title(), &editor_markdown()),
         &component_manifests,
@@ -689,12 +731,31 @@ fn PageEditor(
                             placeholder: "Page title"
                         }
                     }
-                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
-                        "Markdown"
-                        textarea {
-                            value: "{editor_markdown}",
-                            oninput: move |event| editor_markdown.set(event.value()),
-                            placeholder: "# Page title"
+                    div { class: "flex flex-wrap items-center gap-2",
+                        ModeButton {
+                            label: "Builder",
+                            active: editor_mode() == EditorMode::Builder,
+                            onclick: move |_| editor_mode.set(EditorMode::Builder)
+                        }
+                        ModeButton {
+                            label: "Markdown",
+                            active: editor_mode() == EditorMode::Markdown,
+                            onclick: move |_| editor_mode.set(EditorMode::Markdown)
+                        }
+                    }
+                    match editor_mode() {
+                        EditorMode::Builder => rsx! {
+                            PageBuilder { editor_markdown }
+                        },
+                        EditorMode::Markdown => rsx! {
+                            label { class: "grid gap-1 text-sm font-semibold text-slate-700",
+                                "Markdown"
+                                textarea {
+                                    value: "{editor_markdown}",
+                                    oninput: move |event| editor_markdown.set(event.value()),
+                                    placeholder: "# Page title"
+                                }
+                            }
                         }
                     }
                 }

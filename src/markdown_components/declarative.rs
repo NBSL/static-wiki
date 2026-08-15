@@ -4,11 +4,187 @@ use markdown_it::{
     MarkdownIt, Node, NodeValue, Renderer,
 };
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 
-const BUILTIN_MANIFESTS: &[&str] = &[
-    include_str!("declarative/callout.json"),
-    include_str!("declarative/infobox.json"),
-    include_str!("declarative/item_card.json"),
+pub(crate) const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
+    (
+        "callout",
+        r#"{
+  "name": "Callout",
+  "fence": "callout",
+  "aliases": ["note"],
+  "wrapper_tag": "aside",
+  "wrapper_class": "callout",
+  "aria_label": "Callout",
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "div",
+      "class": "callout-title"
+    },
+    {
+      "key": "image",
+      "type": "image",
+      "class": "callout-image",
+      "alt_from": "alt"
+    },
+    {
+      "key": "body",
+      "aliases": ["text", "description"],
+      "type": "text",
+      "tag": "p",
+      "class": "callout-body",
+      "repeatable": true
+    },
+    {
+      "key": "items",
+      "aliases": ["list"],
+      "type": "list",
+      "split": "|",
+      "wrapper_tag": "ul",
+      "wrapper_class": "callout-list",
+      "item_tag": "li"
+    }
+  ],
+  "unknown_fields": {
+    "class": "markdown-component-fields",
+    "row_class": "markdown-component-row",
+    "label_class": "markdown-component-label",
+    "value_class": "markdown-component-value"
+  }
+}"#,
+    ),
+    (
+        "infobox",
+        r#"{
+  "name": "Infobox",
+  "fence": "infobox",
+  "aliases": ["infocard", "info-card"],
+  "wrapper_tag": "aside",
+  "wrapper_class": "infobox",
+  "aria_label": "Infobox",
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "div",
+      "class": "infobox-title"
+    },
+    {
+      "key": "image",
+      "type": "image",
+      "class": "infobox-image",
+      "alt_from": "alt"
+    },
+    {
+      "key": "caption",
+      "aliases": ["image_caption"],
+      "type": "text",
+      "tag": "div",
+      "class": "infobox-caption"
+    }
+  ],
+  "unknown_fields": {
+    "class": "infobox-fields",
+    "row_class": "infobox-row"
+  }
+}"#,
+    ),
+    (
+        "item-card",
+        r#"{
+  "name": "Item card",
+  "fence": "item-card",
+  "aliases": ["item_card", "item", "itembox", "item-box"],
+  "wrapper_tag": "figure",
+  "wrapper_class": "item-card",
+  "aria_label": "Item card",
+  "layout": [
+    { "type": "field", "field": "title" },
+    {
+      "type": "container",
+      "tag": "div",
+      "class": "item-card-content",
+      "children": [
+        {
+          "type": "container",
+          "tag": "div",
+          "class": "item-card-icon",
+          "children": [
+            { "type": "field", "field": "icon" }
+          ]
+        },
+        {
+          "type": "container",
+          "tag": "div",
+          "class": "item-card-details",
+          "children": [
+            { "type": "remaining_fields" }
+          ]
+        }
+      ]
+    }
+  ],
+  "fields": [
+    {
+      "key": "title",
+      "aliases": ["name"],
+      "type": "text",
+      "tag": "figcaption",
+      "class": "item-card-title"
+    },
+    {
+      "key": "icon",
+      "type": "class_marker",
+      "tag": "span",
+      "class": "item-card-icon-art",
+      "class_prefix": "item-card-icon-",
+      "default": "necklace",
+      "aria_hidden": true
+    },
+    {
+      "key": "tags",
+      "aliases": ["tag", "kind", "type", "rarity"],
+      "type": "list",
+      "split": ",|",
+      "wrapper_tag": "div",
+      "wrapper_class": "item-card-tags",
+      "item_tag": "span",
+      "repeatable": true
+    },
+    {
+      "key": "description",
+      "aliases": ["desc", "flavor"],
+      "type": "text",
+      "tag": "p",
+      "class": "item-card-description",
+      "repeatable": true
+    },
+    {
+      "key": "line",
+      "type": "key_value_list",
+      "split": "|",
+      "wrapper_tag": "div",
+      "wrapper_class": "item-card-line",
+      "pair_class": "item-card-pair",
+      "label_class": "item-card-label",
+      "value_class": "item-card-value",
+      "repeatable": true
+    }
+  ],
+  "unknown_fields": {
+    "type": "key_value_lines",
+    "wrapper_tag": "div",
+    "class": "item-card-line",
+    "pair_class": "item-card-pair",
+    "label_class": "item-card-label",
+    "value_class": "item-card-value"
+  }
+}"#,
+    ),
 ];
 
 #[derive(Clone, Debug)]
@@ -60,6 +236,8 @@ struct FieldDefinition {
     value_class: Option<String>,
     split: String,
     alt_from: Option<String>,
+    image_width: Option<u32>,
+    image_height: Option<u32>,
     default_value: Option<String>,
     aria_hidden: bool,
     repeatable: bool,
@@ -188,6 +366,9 @@ struct FieldManifest {
     value_class: Option<String>,
     split: String,
     alt_from: Option<String>,
+    width: Option<JsonValue>,
+    height: Option<JsonValue>,
+    size: Option<JsonValue>,
     #[serde(rename = "default")]
     default_value: Option<String>,
     aria_hidden: bool,
@@ -212,6 +393,9 @@ impl Default for FieldManifest {
             value_class: None,
             split: ",".to_owned(),
             alt_from: None,
+            width: None,
+            height: None,
+            size: None,
             default_value: None,
             aria_hidden: false,
             repeatable: false,
@@ -259,7 +443,7 @@ pub(super) fn add_rules(parser: &mut MarkdownIt, extra_manifests: &[String]) {
 fn load_components(extra_manifests: &[String]) -> Vec<ComponentDefinition> {
     BUILTIN_MANIFESTS
         .iter()
-        .copied()
+        .map(|(_, manifest)| *manifest)
         .chain(extra_manifests.iter().map(String::as_str))
         .filter_map(parse_component_definition)
         .collect()
@@ -373,6 +557,7 @@ impl FieldDefinition {
         );
         keys.sort();
         keys.dedup();
+        let image_size = safe_image_dimension(manifest.size.as_ref());
 
         Some(Self {
             keys,
@@ -392,6 +577,8 @@ impl FieldDefinition {
                 .alt_from
                 .as_deref()
                 .and_then(normalize_component_key),
+            image_width: safe_image_dimension(manifest.width.as_ref()).or(image_size),
+            image_height: safe_image_dimension(manifest.height.as_ref()).or(image_size),
             default_value: manifest
                 .default_value
                 .filter(|value| !value.trim().is_empty()),
@@ -686,6 +873,12 @@ fn render_image_field(
     let mut attrs = class_attrs(&definition.class);
     attrs.push(("src", src));
     attrs.push(("alt", alt));
+    if let Some(width) = definition.image_width {
+        attrs.push(("width", width.to_string()));
+    }
+    if let Some(height) = definition.image_height {
+        attrs.push(("height", height.to_string()));
+    }
     fmt.self_close("img", &attrs);
 }
 
@@ -911,6 +1104,18 @@ fn dynamic_class_suffix(value: &str) -> Option<String> {
     (!suffix.is_empty()).then_some(suffix)
 }
 
+fn safe_image_dimension(value: Option<&JsonValue>) -> Option<u32> {
+    let dimension = match value? {
+        JsonValue::Number(number) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())?,
+        JsonValue::String(value) => value.trim().parse::<u32>().ok()?,
+        _ => return None,
+    };
+
+    (1..=10_000).contains(&dimension).then_some(dimension)
+}
+
 fn default_field_tag(kind: FieldKind) -> &'static str {
     match kind {
         FieldKind::ClassMarker => "span",
@@ -1132,6 +1337,76 @@ mod tests {
 
         assert!(!html.contains("javascript:alert"));
         assert!(!html.contains("<img"));
+    }
+
+    #[test]
+    fn render_markdown_with_component_manifests_should_render_image_dimensions() {
+        let manifest = r#"{
+            "name": "Image Box",
+            "fence": "image-box",
+            "fields": [
+                {
+                    "key": "image",
+                    "type": "image",
+                    "class": "image-box-image",
+                    "width": 96,
+                    "height": "144"
+                }
+            ]
+        }"#;
+
+        let html = render_markdown_with_component_manifests(
+            "```image-box\nimage: portrait.png\n```",
+            &[manifest.to_owned()],
+        );
+
+        assert!(html.contains(r#"width="96" height="144""#));
+    }
+
+    #[test]
+    fn render_markdown_with_component_manifests_should_use_square_image_size() {
+        let manifest = r#"{
+            "name": "Avatar",
+            "fence": "avatar",
+            "fields": [
+                {
+                    "key": "image",
+                    "type": "image",
+                    "size": 64
+                }
+            ]
+        }"#;
+
+        let html = render_markdown_with_component_manifests(
+            "```avatar\nimage: portrait.png\n```",
+            &[manifest.to_owned()],
+        );
+
+        assert!(html.contains(r#"width="64" height="64""#));
+    }
+
+    #[test]
+    fn render_markdown_with_component_manifests_should_ignore_invalid_image_dimensions() {
+        let manifest = r#"{
+            "name": "Image Box",
+            "fence": "image-box",
+            "fields": [
+                {
+                    "key": "image",
+                    "type": "image",
+                    "width": "100%;color:red",
+                    "height": 0
+                }
+            ]
+        }"#;
+
+        let html = render_markdown_with_component_manifests(
+            "```image-box\nimage: portrait.png\n```",
+            &[manifest.to_owned()],
+        );
+
+        assert!(!html.contains("width="));
+        assert!(!html.contains("height="));
     }
 
     #[test]

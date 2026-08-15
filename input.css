@@ -16,8 +16,13 @@
     }
 
     input,
-    textarea {
+    textarea,
+    select {
         @apply w-full rounded-md border border-stone-300 bg-white px-3 py-2 text-slate-900 outline-none transition focus:border-emerald-700 focus:ring-2 focus:ring-emerald-100;
+    }
+
+    select {
+        @apply h-10;
     }
 
     textarea {
@@ -372,6 +377,10 @@
         }
     }
 
+
+    .markdown .npc-card-portrait {
+        width: 250px;
+    }
     .diff-line {
         @apply grid min-h-7 grid-cols-[58px_58px_minmax(0,1fr)] whitespace-pre-wrap font-mono text-sm;
     }

@@ -1,9 +1,9 @@
 use crate::markdown::{humanize_slug, title_from_markdown};
 use crate::models::{
-    DiffLine, DiffLineKind, PageDetail, PageDiff, PageRevision, PageSummary, PageTemplateDraft,
-    PageTemplateSummary,
+    DiffLine, DiffLineKind, MediaEntry, MediaEntryKind, MediaListing, PageDetail, PageDiff,
+    PageRevision, PageSummary, PageTemplateDraft, PageTemplateSummary,
 };
-use crate::slug::is_valid_slug;
+use crate::slug::{is_valid_slug, normalize_slug};
 use crate::user::AuthUser;
 use git2::{
     Commit, DiffFormat, DiffOptions, IndexAddOption, Oid, Repository, RepositoryInitOptions,
@@ -23,20 +23,6 @@ const TEMPLATES_DIR: &str = "templates";
 const MEDIA_DIR: &str = "media";
 const COMPONENTS_DIR: &str = "components";
 const DEFAULT_HOME: &str = "# Home\n\nWelcome to your Rust and Dioxus wiki.\n";
-const DEFAULT_COMPONENTS: [(&str, &str); 3] = [
-    (
-        "callout",
-        include_str!("../markdown_components/declarative/callout.json"),
-    ),
-    (
-        "infobox",
-        include_str!("../markdown_components/declarative/infobox.json"),
-    ),
-    (
-        "item-card",
-        include_str!("../markdown_components/declarative/item_card.json"),
-    ),
-];
 const DEFAULT_TEMPLATES: [(&str, &str); 3] = [
     (
         "article",
@@ -64,6 +50,18 @@ pub enum StorageError {
     RevisionNotFound(String),
     #[error("page template `{0}` was not found")]
     TemplateNotFound(String),
+    #[error("invalid media path `{0}`")]
+    InvalidMediaPath(String),
+    #[error("media folder `{0}` was not found")]
+    MediaFolderNotFound(String),
+    #[error("media folder `{0}` already exists")]
+    MediaFolderExists(String),
+    #[error("media file `{0}` was not found")]
+    MediaFileNotFound(String),
+    #[error("media file `{0}` already exists")]
+    MediaFileExists(String),
+    #[error("unsupported media type `{0}`")]
+    UnsupportedMediaType(String),
     #[error("history entry is not valid UTF-8")]
     Utf8(#[from] std::str::Utf8Error),
 }
@@ -85,6 +83,35 @@ pub fn save_page(
     user: &AuthUser,
 ) -> StorageResult<PageDetail> {
     with_store(|store| store.save_page(slug, title, markdown, user))
+}
+
+pub fn list_media(path: &str) -> StorageResult<MediaListing> {
+    with_store(|store| store.list_media(path))
+}
+
+pub fn create_media_folder(
+    parent: &str,
+    name: &str,
+    user: &AuthUser,
+) -> StorageResult<MediaListing> {
+    with_store(|store| store.create_media_folder(parent, name, user))
+}
+
+pub fn save_media_file(
+    folder: &str,
+    filename: &str,
+    contents: &[u8],
+    user: &AuthUser,
+) -> StorageResult<MediaListing> {
+    with_store(|store| store.save_media_file(folder, filename, contents, user))
+}
+
+pub fn move_media_file(
+    source_path: &str,
+    target_folder: &str,
+    user: &AuthUser,
+) -> StorageResult<()> {
+    with_store(|store| store.move_media_file(source_path, target_folder, user))
 }
 
 pub fn list_templates() -> StorageResult<Vec<PageTemplateSummary>> {
@@ -227,7 +254,7 @@ impl WikiStore {
     fn ensure_seed_components(&self) -> StorageResult<()> {
         let component_dir = self.root.join(COMPONENTS_DIR);
         fs::create_dir_all(&component_dir)?;
-        for (slug, manifest) in DEFAULT_COMPONENTS {
+        for (slug, manifest) in crate::markdown_components::builtin_declarative_manifests() {
             let path = self.component_path(slug)?;
             if !path.exists() {
                 fs::write(path, manifest)?;
@@ -400,6 +427,198 @@ impl WikiStore {
             .ok_or_else(|| StorageError::InvalidSlug(slug.to_owned()))
     }
 
+    pub fn list_media(&self, path: &str) -> StorageResult<MediaListing> {
+        let rel_path = safe_media_folder_rel_path(path)
+            .ok_or_else(|| StorageError::InvalidMediaPath(path.to_owned()))?;
+        let media_path = self.root.join(MEDIA_DIR).join(&rel_path);
+        if !media_path.exists() {
+            return Err(StorageError::MediaFolderNotFound(display_media_path(
+                &rel_path,
+            )));
+        }
+        if !media_path.is_dir() {
+            return Err(StorageError::InvalidMediaPath(display_media_path(
+                &rel_path,
+            )));
+        }
+
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(media_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name == ".gitkeep" {
+                continue;
+            }
+
+            let entry_rel_path = rel_path.join(name);
+            if path.is_dir() {
+                entries.push(MediaEntry {
+                    name: name.to_owned(),
+                    path: media_path_string(&entry_rel_path),
+                    kind: MediaEntryKind::Folder,
+                    size: None,
+                    url: None,
+                });
+                continue;
+            }
+
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(kind) = media_kind_for_path(&path) else {
+                continue;
+            };
+            entries.push(MediaEntry {
+                name: name.to_owned(),
+                path: media_path_string(&entry_rel_path),
+                kind,
+                size: Some(path.metadata()?.len()),
+                url: Some(media_url(&entry_rel_path)),
+            });
+        }
+
+        entries.sort_by(|left, right| {
+            media_entry_rank(left.kind)
+                .cmp(&media_entry_rank(right.kind))
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+
+        Ok(MediaListing {
+            path: media_path_string(&rel_path),
+            parent: media_parent_path(&rel_path),
+            entries,
+        })
+    }
+
+    pub fn create_media_folder(
+        &self,
+        parent: &str,
+        name: &str,
+        user: &AuthUser,
+    ) -> StorageResult<MediaListing> {
+        let parent_rel_path = safe_media_folder_rel_path(parent)
+            .ok_or_else(|| StorageError::InvalidMediaPath(parent.to_owned()))?;
+        let folder_name = normalize_slug(name)
+            .ok_or_else(|| StorageError::InvalidMediaPath(name.trim().to_owned()))?;
+        let rel_path = parent_rel_path.join(folder_name);
+        let path = self.root.join(MEDIA_DIR).join(&rel_path);
+
+        if path.exists() {
+            return Err(StorageError::MediaFolderExists(display_media_path(
+                &rel_path,
+            )));
+        }
+
+        fs::create_dir_all(&path)?;
+        fs::write(path.join(".gitkeep"), "")?;
+        self.commit_media_change(
+            &format!("Create media folder {}", display_media_path(&rel_path)),
+            user,
+        )?;
+        self.list_media(parent)
+    }
+
+    pub fn save_media_file(
+        &self,
+        folder: &str,
+        filename: &str,
+        contents: &[u8],
+        user: &AuthUser,
+    ) -> StorageResult<MediaListing> {
+        let folder_rel_path = safe_media_folder_rel_path(folder)
+            .ok_or_else(|| StorageError::InvalidMediaPath(folder.to_owned()))?;
+        let filename = safe_media_filename(filename)
+            .ok_or_else(|| StorageError::InvalidMediaPath(filename.to_owned()))?;
+        if media_content_type(Path::new(&filename)).is_none() {
+            return Err(StorageError::UnsupportedMediaType(filename));
+        }
+
+        let folder_path = self.root.join(MEDIA_DIR).join(&folder_rel_path);
+        if !folder_path.exists() {
+            return Err(StorageError::MediaFolderNotFound(display_media_path(
+                &folder_rel_path,
+            )));
+        }
+        if !folder_path.is_dir() {
+            return Err(StorageError::InvalidMediaPath(display_media_path(
+                &folder_rel_path,
+            )));
+        }
+
+        let rel_path = folder_rel_path.join(&filename);
+        fs::write(folder_path.join(&filename), contents)?;
+        self.commit_media_change(
+            &format!("Upload media {}", display_media_path(&rel_path)),
+            user,
+        )?;
+        self.list_media(folder)
+    }
+
+    pub fn move_media_file(
+        &self,
+        source_path: &str,
+        target_folder: &str,
+        user: &AuthUser,
+    ) -> StorageResult<()> {
+        let source_rel_path = safe_media_rel_path(source_path)
+            .ok_or_else(|| StorageError::InvalidMediaPath(source_path.to_owned()))?;
+        let target_rel_path = safe_media_folder_rel_path(target_folder)
+            .ok_or_else(|| StorageError::InvalidMediaPath(target_folder.to_owned()))?;
+        let source = self.root.join(MEDIA_DIR).join(&source_rel_path);
+        if !source.is_file() {
+            return Err(StorageError::MediaFileNotFound(display_media_path(
+                &source_rel_path,
+            )));
+        }
+        if media_content_type(&source).is_none() {
+            return Err(StorageError::UnsupportedMediaType(display_media_path(
+                &source_rel_path,
+            )));
+        }
+
+        let target_dir = self.root.join(MEDIA_DIR).join(&target_rel_path);
+        if !target_dir.exists() {
+            return Err(StorageError::MediaFolderNotFound(display_media_path(
+                &target_rel_path,
+            )));
+        }
+        if !target_dir.is_dir() {
+            return Err(StorageError::InvalidMediaPath(display_media_path(
+                &target_rel_path,
+            )));
+        }
+
+        let Some(filename) = source_rel_path.file_name() else {
+            return Err(StorageError::InvalidMediaPath(source_path.to_owned()));
+        };
+        let destination_rel_path = target_rel_path.join(filename);
+        let destination = self.root.join(MEDIA_DIR).join(&destination_rel_path);
+        if source == destination {
+            return Ok(());
+        }
+        if destination.exists() {
+            return Err(StorageError::MediaFileExists(display_media_path(
+                &destination_rel_path,
+            )));
+        }
+
+        fs::rename(source, destination)?;
+        self.commit_media_change(
+            &format!(
+                "Move media {} to {}",
+                display_media_path(&source_rel_path),
+                display_media_path(&target_rel_path)
+            ),
+            user,
+        )?;
+
+        Ok(())
+    }
+
     pub fn page_history(&self, slug: &str) -> StorageResult<Vec<PageRevision>> {
         validate_slug(slug)?;
         let rel_path = page_rel_path(slug);
@@ -512,6 +731,28 @@ impl WikiStore {
         Ok(false)
     }
 
+    fn commit_media_change(&self, message: &str, user: &AuthUser) -> StorageResult<()> {
+        let mut index = self.repo.index()?;
+        index.add_all([MEDIA_DIR], IndexAddOption::DEFAULT, None)?;
+        index.write()?;
+        let tree_id = index.write_tree()?;
+        let tree = self.repo.find_tree(tree_id)?;
+        let signature = git_signature(user)?;
+        let parent = self.head_commit().ok();
+        let parent_refs = parent.iter().collect::<Vec<_>>();
+
+        self.repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parent_refs,
+        )?;
+
+        Ok(())
+    }
+
     fn page_path(&self, slug: &str) -> StorageResult<PathBuf> {
         validate_slug(slug)?;
         Ok(self.root.join(page_rel_path(slug)))
@@ -548,6 +789,15 @@ fn component_rel_path(slug: &str) -> PathBuf {
     PathBuf::from(COMPONENTS_DIR).join(format!("{slug}.json"))
 }
 
+fn safe_media_folder_rel_path(request_path: &str) -> Option<PathBuf> {
+    let trimmed = request_path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    safe_media_rel_path(trimmed)
+}
+
 fn safe_media_rel_path(request_path: &str) -> Option<PathBuf> {
     let mut rel_path = PathBuf::new();
     for segment in request_path.split('/') {
@@ -565,6 +815,75 @@ fn safe_media_rel_path(request_path: &str) -> Option<PathBuf> {
     (!rel_path.as_os_str().is_empty()).then_some(rel_path)
 }
 
+fn safe_media_filename(filename: &str) -> Option<String> {
+    let filename = filename.trim();
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains('\0')
+    {
+        return None;
+    }
+
+    let path = Path::new(filename);
+    let stem = path.file_stem()?.to_str()?;
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if media_content_type(Path::new(&format!("file.{extension}"))).is_none() {
+        return None;
+    }
+
+    normalize_slug(stem).map(|stem| format!("{stem}.{extension}"))
+}
+
+fn media_path_string(path: &Path) -> String {
+    path.iter()
+        .filter_map(|segment| segment.to_str())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn media_parent_path(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+
+    let mut parent = path.to_path_buf();
+    parent.pop();
+    Some(media_path_string(&parent))
+}
+
+fn display_media_path(path: &Path) -> String {
+    let path = media_path_string(path);
+    if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path
+    }
+}
+
+fn media_url(path: &Path) -> String {
+    format!("/media/{}", media_path_string(path))
+}
+
+fn media_kind_for_path(path: &Path) -> Option<MediaEntryKind> {
+    let content_type = media_content_type(path)?;
+    if content_type.starts_with("image/") {
+        Some(MediaEntryKind::Image)
+    } else if content_type.starts_with("video/") {
+        Some(MediaEntryKind::Video)
+    } else {
+        None
+    }
+}
+
+fn media_entry_rank(kind: MediaEntryKind) -> u8 {
+    match kind {
+        MediaEntryKind::Folder => 0,
+        MediaEntryKind::Image => 1,
+        MediaEntryKind::Video => 2,
+    }
+}
+
 fn media_content_type(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -578,6 +897,11 @@ fn media_content_type(path: &Path) -> Option<&'static str> {
         Some("png") => Some("image/png"),
         Some("svg") => Some("image/svg+xml"),
         Some("webp") => Some("image/webp"),
+        Some("m4v") => Some("video/x-m4v"),
+        Some("mov") => Some("video/quicktime"),
+        Some("mp4") => Some("video/mp4"),
+        Some("ogg" | "ogv") => Some("video/ogg"),
+        Some("webm") => Some("video/webm"),
         _ => None,
     }
 }
@@ -783,6 +1107,146 @@ mod tests {
     }
 
     #[test]
+    fn safe_media_folder_rel_path_should_allow_root() {
+        let path = safe_media_folder_rel_path("");
+
+        assert_eq!(path.as_deref(), Some(Path::new("")));
+    }
+
+    #[test]
+    fn safe_media_filename_should_sanitize_supported_uploads() {
+        let filename = safe_media_filename("Portrait Image.JPG");
+
+        assert_eq!(filename.as_deref(), Some("portrait-image.jpg"));
+    }
+
+    #[test]
+    fn safe_media_filename_should_reject_nested_uploads() {
+        let filename = safe_media_filename("../portrait.png");
+
+        assert!(filename.is_none());
+    }
+
+    #[test]
+    fn list_media_should_include_folders_images_and_videos() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+        let media_dir = dir.path().join(MEDIA_DIR);
+        fs::create_dir_all(media_dir.join("portraits")).expect("folder should be created");
+        fs::write(media_dir.join("hero.png"), b"image").expect("image should be written");
+        fs::write(media_dir.join("intro.webm"), b"video").expect("video should be written");
+        fs::write(media_dir.join("notes.txt"), b"text").expect("text should be written");
+
+        let listing = store.list_media("").expect("media should load");
+
+        assert_eq!(listing.path, "");
+        assert_eq!(listing.parent, None);
+        assert!(listing.entries.iter().any(|entry| entry.name == "portraits"
+            && entry.path == "portraits"
+            && entry.kind == MediaEntryKind::Folder));
+        assert!(listing.entries.iter().any(|entry| entry.name == "hero.png"
+            && entry.path == "hero.png"
+            && entry.kind == MediaEntryKind::Image
+            && entry.url.as_deref() == Some("/media/hero.png")));
+        assert!(listing
+            .entries
+            .iter()
+            .any(|entry| entry.name == "intro.webm"
+                && entry.path == "intro.webm"
+                && entry.kind == MediaEntryKind::Video
+                && entry.url.as_deref() == Some("/media/intro.webm")));
+        assert!(!listing
+            .entries
+            .iter()
+            .any(|entry| entry.name == "notes.txt"));
+    }
+
+    #[test]
+    fn create_media_folder_should_sanitize_name_and_track_placeholder() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        let listing = store
+            .create_media_folder("", "NPC Portraits", &test_user())
+            .expect("folder should be created");
+
+        assert!(dir
+            .path()
+            .join(MEDIA_DIR)
+            .join("npc-portraits")
+            .join(".gitkeep")
+            .exists());
+        assert!(listing
+            .entries
+            .iter()
+            .any(|entry| entry.name == "npc-portraits"
+                && entry.path == "npc-portraits"
+                && entry.kind == MediaEntryKind::Folder));
+    }
+
+    #[test]
+    fn save_media_file_should_sanitize_name_and_save_video() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        let listing = store
+            .save_media_file("", "Intro Clip.MP4", b"video", &test_user())
+            .expect("video should be saved");
+
+        assert_eq!(
+            fs::read(dir.path().join(MEDIA_DIR).join("intro-clip.mp4"))
+                .expect("video should exist"),
+            b"video"
+        );
+        assert!(listing
+            .entries
+            .iter()
+            .any(|entry| entry.name == "intro-clip.mp4"
+                && entry.kind == MediaEntryKind::Video
+                && entry.url.as_deref() == Some("/media/intro-clip.mp4")));
+    }
+
+    #[test]
+    fn move_media_file_should_move_image_into_existing_folder() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+        let media_dir = dir.path().join(MEDIA_DIR);
+        fs::create_dir_all(media_dir.join("portraits")).expect("folder should be created");
+        fs::write(media_dir.join("hero.png"), b"image").expect("image should be written");
+
+        store
+            .move_media_file("hero.png", "portraits", &test_user())
+            .expect("image should move");
+
+        assert!(!media_dir.join("hero.png").exists());
+        assert_eq!(
+            fs::read(media_dir.join("portraits").join("hero.png"))
+                .expect("moved image should exist"),
+            b"image"
+        );
+    }
+
+    #[test]
+    fn move_media_file_should_reject_existing_destination() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+        let media_dir = dir.path().join(MEDIA_DIR);
+        fs::create_dir_all(media_dir.join("portraits")).expect("folder should be created");
+        fs::write(media_dir.join("hero.png"), b"image").expect("image should be written");
+        fs::write(media_dir.join("portraits").join("hero.png"), b"existing")
+            .expect("existing image should be written");
+
+        let err = store
+            .move_media_file("hero.png", "portraits", &test_user())
+            .expect_err("move should reject overwrite");
+
+        assert_eq!(
+            err.to_string(),
+            "media file `portraits/hero.png` already exists"
+        );
+    }
+
+    #[test]
     fn read_media_file_from_roots_should_read_image_file() {
         let dir = tempdir().expect("temp dir should be created");
         fs::write(dir.path().join("example.svg"), "<svg></svg>")
@@ -793,5 +1257,17 @@ mod tests {
             .expect("media file should be found");
 
         assert_eq!(media.content_type, "image/svg+xml");
+    }
+
+    #[test]
+    fn read_media_file_from_roots_should_read_video_file() {
+        let dir = tempdir().expect("temp dir should be created");
+        fs::write(dir.path().join("clip.mp4"), b"video").expect("media file should be written");
+
+        let media = read_media_file_from_roots("clip.mp4", [dir.path().to_path_buf()])
+            .expect("media lookup should not fail")
+            .expect("media file should be found");
+
+        assert_eq!(media.content_type, "video/mp4");
     }
 }

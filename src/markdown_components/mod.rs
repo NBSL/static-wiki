@@ -18,6 +18,11 @@ pub(crate) fn add_rules_with_manifests(parser: &mut MarkdownIt, manifests: &[Str
     declarative::add_rules(parser, manifests);
 }
 
+#[cfg(feature = "server")]
+pub(crate) fn builtin_declarative_manifests() -> &'static [(&'static str, &'static str)] {
+    declarative::BUILTIN_MANIFESTS
+}
+
 fn register_table_of_contents(parser: &mut MarkdownIt) {
     parser.add_rule::<table_of_contents::TableOfContentsRule>();
 }

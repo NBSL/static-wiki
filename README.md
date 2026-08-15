@@ -24,6 +24,8 @@ Login sessions are stored in `XP_WIKI_SESSION_FILE`, defaulting to `wiki-data/se
 
 Page templates are Markdown files in `wiki-data/templates`. The first `# Heading` is used as the template name in the editor, and the remaining Markdown is copied into new page drafts. Templates can include `{{title}}` and `{{slug}}` placeholders, which are replaced when an editor applies the template.
 
+The page editor includes Builder and Markdown modes. Builder mode inserts common page blocks through form controls, including sections, paragraphs, images, table-of-contents blocks, callouts, infoboxes, and item cards. The generated content is still Markdown, so pages continue to save as local `.md` files with normal Git history.
+
 Pages can include a MediaWiki-style infobox with a fenced `infobox` block. The `infocard` and `info-card` aliases work too. Values are escaped when rendered, so editors should write plain text rather than HTML:
 
 ````markdown
@@ -38,6 +40,8 @@ Known for: AC power
 
 For local wiki media, put image files in `wiki-data/media` or the repo-level `media` folder and use `image: filename.ext`. The `/media` route looks in those folders first and then in the app `assets` directory, so existing bundled images can use the same filename style. You can also use an `https://` URL.
 
+The Media tab browses files under `wiki-data/media`. Editors and admins can create folders, upload image or video files, and drag media files onto folder tiles to move them. Uploads and moves are saved into Git history and served from `/media/path/to/file.ext`.
+
 Pages can include a table of contents with a fenced `toc` block. It adds heading anchors automatically and includes `##` through `######` headings by default:
 
 ````markdown
@@ -51,7 +55,7 @@ ordered: false
 
 Use `title: false` to hide the title. `ordered: true` renders a numbered list.
 
-Markdown components can also be declared as static JSON plugin manifests in `wiki-data/components`. The server seeds `callout.json`, `infobox.json`, and `item-card.json`, and the browser loads these manifests so page view and editor preview render the same component set. Built-in manifests live under `src/markdown_components/declarative` as fallbacks for static builds.
+Markdown components can also be declared as static JSON plugin manifests in `wiki-data/components`. The server seeds `callout.json`, `infobox.json`, and `item-card.json`, and the browser loads these manifests so page view and editor preview render the same component set. Built-in manifests are compiled into the app as fallbacks for static builds.
 
 Example `wiki-data/components/callout.json` manifest:
 
@@ -65,6 +69,7 @@ Example `wiki-data/components/callout.json` manifest:
   "aria_label": "Callout",
   "fields": [
     { "key": "title", "type": "text", "tag": "div", "class": "callout-title" },
+    { "key": "image", "type": "image", "class": "callout-image", "width": 320, "height": 180 },
     { "key": "body", "aliases": ["text"], "type": "text", "tag": "p", "class": "callout-body", "repeatable": true },
     { "key": "items", "type": "list", "split": "|", "wrapper_tag": "ul", "wrapper_class": "callout-list", "item_tag": "li" }
   ],
@@ -88,7 +93,7 @@ Status: Draft
 ```
 ````
 
-Declarative fields support `text`, `image`, `list`, `key_value_list`, and `class_marker`. Manifests can also define a safe `layout` with `container`, `field`, and `remaining_fields` nodes for nested component markup. Text is escaped, image paths are restricted to safe local media paths or `http(s)` URLs, and manifest tags/classes are sanitized before rendering.
+Declarative fields support `text`, `image`, `list`, `key_value_list`, and `class_marker`. Image fields can define numeric `width` and `height` attributes, or a square `size` value that sets both. Manifests can also define a safe `layout` with `container`, `field`, and `remaining_fields` nodes for nested component markup. Text is escaped, image paths are restricted to safe local media paths or `http(s)` URLs, and manifest tags/classes are sanitized before rendering.
 
 Pages can also include RPG-style item panels with a fenced `item-card` block. The `item`, `itembox`, and `item-box` aliases work too:
 

@@ -36,6 +36,29 @@ pub struct PageTemplateDraft {
     pub markdown: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MediaEntryKind {
+    Folder,
+    Image,
+    Video,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MediaEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: MediaEntryKind,
+    pub size: Option<u64>,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MediaListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<MediaEntry>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PageRevision {
     pub id: String,
