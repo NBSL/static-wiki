@@ -3,6 +3,7 @@ mod markdown;
 mod markdown_components;
 mod media;
 mod models;
+mod settings;
 mod slug;
 mod user;
 
@@ -11,12 +12,16 @@ mod server;
 
 use builder::{EditorMode, ModeButton, PageBuilder};
 use dioxus::prelude::*;
-use markdown::{compose_page_markdown, render_markdown_with_component_manifests};
+use markdown::{
+    categories_text_from_page_markdown, compose_page_markdown_with_categories,
+    editable_body_from_page_markdown, render_markdown_with_component_manifests,
+};
 use media::{list_media_entries, MediaManager};
 use models::{
-    AuthProviderInfo, DiffLineKind, PageDetail, PageDiff, PageRevision, PageSummary,
+    AuthProviderInfo, DiffLineKind, HtmlExport, PageDetail, PageDiff, PageRevision, PageSummary,
     PageTemplateDraft, PageTemplateSummary,
 };
+use settings::{load_settings_overview, SettingsView};
 use slug::normalize_slug;
 use user::{
     delete_managed_user, list_managed_users, save_managed_user, AuthUser, ManagedUser,
@@ -24,6 +29,8 @@ use user::{
 };
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
+#[cfg(feature = "server")]
+const SERVER_FUNCTION_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveTab {
@@ -32,6 +39,7 @@ enum ActiveTab {
     History,
     Media,
     Users,
+    Settings,
 }
 
 fn markdown_component_manifests(state: &Option<ServerFnResult<Vec<String>>>) -> Vec<String> {
@@ -47,12 +55,13 @@ fn main() {
     {
         dioxus::serve(|| async move {
             use dioxus::server::{
-                axum::{routing::get as axum_get, Router},
+                axum::{extract::DefaultBodyLimit, routing::get as axum_get, Router},
                 DioxusRouterExt, ServeConfig,
             };
 
             let router = Router::new()
                 .route("/media/{*path}", axum_get(media_handler))
+                .route("/exports/{*path}", axum_get(export_handler))
                 .route(
                     "/auth/login/{provider}",
                     axum_get(server::auth::login_handler),
@@ -62,7 +71,8 @@ fn main() {
                     axum_get(server::auth::callback_handler),
                 )
                 .route("/auth/logout", axum_get(server::auth::logout_handler))
-                .serve_dioxus_application(ServeConfig::new(), App);
+                .serve_dioxus_application(ServeConfig::new(), App)
+                .layer(DefaultBodyLimit::max(SERVER_FUNCTION_BODY_LIMIT_BYTES));
 
             Ok(router)
         });
@@ -91,6 +101,7 @@ fn App() -> Element {
     let mut selected_slug = use_signal(|| "home".to_owned());
     let mut active_tab = use_signal(|| ActiveTab::View);
     let mut editor_title = use_signal(String::new);
+    let mut editor_categories = use_signal(String::new);
     let mut editor_markdown = use_signal(String::new);
     let mut draft_slug = use_signal(|| "home".to_owned());
     let mut selected_template_slug = use_signal(String::new);
@@ -103,6 +114,7 @@ fn App() -> Element {
     let mut managed_user_email = use_signal(String::new);
     let mut managed_user_role = use_signal(|| "viewer".to_owned());
     let mut managed_user_locked = use_signal(|| false);
+    let mut export_html_url = use_signal(String::new);
     let media_path = use_signal(String::new);
     let new_media_folder_name = use_signal(String::new);
 
@@ -153,6 +165,14 @@ fn App() -> Element {
             Ok(Vec::new())
         }
     });
+    let mut settings_resource = use_resource(move || async move {
+        let _ = refresh_key();
+        if active_tab() == ActiveTab::Settings {
+            Some(load_settings_overview().await)
+        } else {
+            None
+        }
+    });
     let diff_resource = use_resource(move || async move {
         let slug = selected_slug();
         let revision = selected_revision();
@@ -172,16 +192,21 @@ fn App() -> Element {
     let page_state = page_resource();
     let history_state = history_resource();
     let users_state = users_resource();
+    let settings_state = settings_resource().flatten();
     let diff_state = diff_resource();
     let user_access = user_access_resource().and_then(Result::ok);
     let can_manage_users = user_access
         .as_ref()
         .is_some_and(|access| access.can_manage_users);
+    let can_manage_settings = user_access
+        .as_ref()
+        .is_some_and(|access| access.can_manage_settings);
     let current_user_role = user_access
         .as_ref()
         .and_then(|access| access.role.clone())
         .unwrap_or_else(|| NO_ROLE_LABEL.to_owned());
     let can_manage_media = matches!(current_user_role.as_str(), "admin" | "editor");
+    let can_export_html = matches!(current_user_role.as_str(), "admin" | "editor");
     let user_is_authenticated = user.is_some();
     let current_page = page_state
         .as_ref()
@@ -192,6 +217,7 @@ fn App() -> Element {
     let header_title = match active {
         ActiveTab::Users => "Users".to_owned(),
         ActiveTab::Media => "Media".to_owned(),
+        ActiveTab::Settings => "Settings".to_owned(),
         _ => current_page
             .as_ref()
             .map(|page| page.title.clone())
@@ -199,6 +225,7 @@ fn App() -> Element {
     };
     let header_context = match active {
         ActiveTab::Users => format!("Role: {current_user_role}"),
+        ActiveTab::Settings => format!("Role: {current_user_role}"),
         ActiveTab::Media => {
             let path = media_path();
             if path.is_empty() {
@@ -225,13 +252,17 @@ fn App() -> Element {
         let current_page = current_page.clone();
         move |_| {
             if let Some(page) = current_page.clone() {
+                let categories = page.categories.join(", ");
+                let markdown = editable_body_from_page_markdown(&page.markdown);
                 draft_slug.set(page.slug);
                 editor_title.set(page.title);
-                editor_markdown.set(page.markdown);
+                editor_categories.set(categories);
+                editor_markdown.set(markdown);
                 editor_is_new_page.set(false);
             } else {
                 draft_slug.set(selected_slug());
                 editor_title.set(String::new());
+                editor_categories.set(String::new());
                 editor_markdown.set(String::new());
                 editor_is_new_page.set(true);
             }
@@ -253,9 +284,14 @@ fn App() -> Element {
 
         match apply_page_template(template_slug, normalized_slug.clone(), editor_title()).await {
             Ok(draft) => {
+                let categories = categories_text_from_page_markdown(&draft.markdown);
+                let markdown = editable_body_from_page_markdown(&draft.markdown);
                 draft_slug.set(normalized_slug);
                 editor_title.set(draft.title);
-                editor_markdown.set(draft.markdown);
+                if !categories.is_empty() {
+                    editor_categories.set(categories);
+                }
+                editor_markdown.set(markdown);
                 status.set("Template applied.".to_owned());
             }
             Err(err) => status.set(format!("Template failed: {err}")),
@@ -322,6 +358,26 @@ fn App() -> Element {
             Err(err) => status.set(format!("User delete failed: {err}")),
         }
     };
+    let export_html_action = move |_| async move {
+        if !can_export_html {
+            status.set("Sign in as an editor or admin to export HTML.".to_owned());
+            export_html_url.set(String::new());
+            return;
+        }
+
+        status.set("Exporting HTML...".to_owned());
+        export_html_url.set(String::new());
+        match export_wiki_html().await {
+            Ok(export) => {
+                export_html_url.set(app_server_url(&export.url));
+                status.set(format!(
+                    "Exported {} pages to {}.",
+                    export.page_count, export.path
+                ));
+            }
+            Err(err) => status.set(format!("Export failed: {err}")),
+        }
+    };
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
@@ -340,6 +396,7 @@ fn App() -> Element {
                             selected_slug.set("new-page".to_owned());
                             draft_slug.set(String::new());
                             editor_title.set(String::new());
+                            editor_categories.set(String::new());
                             editor_markdown.set(String::new());
                             selected_template_slug.set(String::new());
                             editor_is_new_page.set(true);
@@ -363,6 +420,7 @@ fn App() -> Element {
                             page_resource.restart();
                             history_resource.restart();
                             users_resource.restart();
+                            settings_resource.restart();
                         },
                         "Refresh"
                     }
@@ -426,6 +484,23 @@ fn App() -> Element {
                                 }
                             }
                         }
+                        if can_manage_settings {
+                            TabButton {
+                                label: "Settings",
+                                active: active_tab() == ActiveTab::Settings,
+                                onclick: move |_| {
+                                    active_tab.set(ActiveTab::Settings);
+                                    settings_resource.restart();
+                                }
+                            }
+                        }
+                        if can_export_html {
+                            button {
+                                class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
+                                onclick: export_html_action,
+                                "Export HTML"
+                            }
+                        }
                         button {
                             class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
                             onclick: open_editor,
@@ -444,7 +519,16 @@ fn App() -> Element {
                             logout_url
                         }
                         if !status().is_empty() {
-                            p { class: "rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900", "{status}" }
+                            div { class: "flex flex-wrap items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900",
+                                span { "{status}" }
+                                if !export_html_url().is_empty() && status().starts_with("Exported ") {
+                                    a {
+                                        class: "font-semibold underline",
+                                        href: "{export_html_url}",
+                                        "Open export"
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -464,6 +548,7 @@ fn App() -> Element {
                                 selected_template_slug,
                                 component_manifests: markdown_component_manifests(&markdown_components_state),
                                 editor_title,
+                                editor_categories,
                                 editor_markdown,
                                 on_apply_template: apply_template_action,
                                 on_cancel: move |_| active_tab.set(ActiveTab::View),
@@ -473,13 +558,22 @@ fn App() -> Element {
                                         return;
                                     };
                                     let title = editor_title();
-                                    let markdown = compose_page_markdown(&title, &editor_markdown());
+                                    let categories = editor_categories();
+                                    let markdown = compose_page_markdown_with_categories(
+                                        &title,
+                                        &categories,
+                                        &editor_markdown(),
+                                    );
                                     match save_wiki_page(slug.clone(), title, markdown).await {
                                         Ok(saved) => {
+                                            let categories = saved.categories.join(", ");
+                                            let markdown =
+                                                editable_body_from_page_markdown(&saved.markdown);
                                             selected_slug.set(saved.slug.clone());
                                             draft_slug.set(saved.slug);
                                             editor_title.set(saved.title);
-                                            editor_markdown.set(saved.markdown);
+                                            editor_categories.set(categories);
+                                            editor_markdown.set(markdown);
                                             editor_is_new_page.set(false);
                                             selected_revision.set(String::new());
                                             active_tab.set(ActiveTab::View);
@@ -525,6 +619,13 @@ fn App() -> Element {
                                 on_select: edit_managed_user,
                                 on_save: save_managed_user_action,
                                 on_delete: delete_managed_user_action,
+                            }
+                        },
+                        ActiveTab::Settings => rsx! {
+                            SettingsView {
+                                settings_state,
+                                can_manage_settings,
+                                refresh_key,
                             }
                         },
                     }
@@ -626,7 +727,7 @@ fn PageView(
     rsx! {
         match page_state {
             Some(Ok(Some(page))) => {
-                let html = render_markdown_with_component_manifests(&page.markdown, &component_manifests);
+                let html = render_markdown_with_component_manifests(&page.rendered_markdown, &component_manifests);
                 rsx! {
                     article {
                         class: "markdown rounded-lg border border-stone-200 bg-white p-5 shadow-sm md:p-8",
@@ -656,6 +757,7 @@ fn PageEditor(
     selected_template_slug: Signal<String>,
     component_manifests: Vec<String>,
     editor_title: Signal<String>,
+    editor_categories: Signal<String>,
     editor_markdown: Signal<String>,
     on_apply_template: EventHandler<MouseEvent>,
     on_cancel: EventHandler<MouseEvent>,
@@ -663,7 +765,11 @@ fn PageEditor(
 ) -> Element {
     let mut editor_mode = use_signal(|| EditorMode::Builder);
     let preview_html = render_markdown_with_component_manifests(
-        &compose_page_markdown(&editor_title(), &editor_markdown()),
+        &compose_page_markdown_with_categories(
+            &editor_title(),
+            &editor_categories(),
+            &editor_markdown(),
+        ),
         &component_manifests,
     );
     let selected_template = selected_template_slug();
@@ -729,6 +835,14 @@ fn PageEditor(
                             value: "{editor_title}",
                             oninput: move |event| editor_title.set(event.value()),
                             placeholder: "Page title"
+                        }
+                    }
+                    label { class: "grid gap-1 text-sm font-semibold text-slate-700",
+                        "Categories"
+                        input {
+                            value: "{editor_categories}",
+                            oninput: move |event| editor_categories.set(event.value()),
+                            placeholder: "test-page, npc"
                         }
                     }
                     div { class: "flex flex-wrap items-center gap-2",
@@ -938,6 +1052,35 @@ async fn media_handler(
     }
 }
 
+#[cfg(feature = "server")]
+async fn export_handler(
+    dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
+) -> dioxus::server::axum::response::Response {
+    use dioxus::server::axum::{
+        http::{
+            header::{CACHE_CONTROL, CONTENT_TYPE},
+            HeaderValue, StatusCode,
+        },
+        response::IntoResponse,
+    };
+
+    match server::storage::read_export_file(&path) {
+        Ok(Some(file)) => {
+            let mut response = file.contents.into_response();
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(file.content_type));
+            response.headers_mut().insert(
+                CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300"),
+            );
+            response
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
 #[get("/api/session/access", headers: dioxus::fullstack::HeaderMap)]
 async fn current_user_access() -> ServerFnResult<UserAccess> {
     match server::auth::current_user_from_headers(&headers) {
@@ -945,6 +1088,7 @@ async fn current_user_access() -> ServerFnResult<UserAccess> {
         None => Ok(UserAccess {
             role: None,
             can_manage_users: false,
+            can_manage_settings: false,
         }),
     }
 }
@@ -972,6 +1116,20 @@ async fn list_page_templates() -> ServerFnResult<Vec<PageTemplateSummary>> {
 #[get("/api/markdown-components")]
 async fn list_markdown_component_manifests() -> ServerFnResult<Vec<String>> {
     server::storage::list_component_manifests().map_err(server_error)
+}
+
+#[post("/api/export/html", headers: dioxus::fullstack::HeaderMap)]
+async fn export_wiki_html() -> ServerFnResult<HtmlExport> {
+    let user = server::auth::current_user_from_headers(&headers).ok_or_else(|| {
+        ServerFnError::ServerError {
+            message: "sign in to export HTML".to_owned(),
+            code: 401,
+            details: None,
+        }
+    })?;
+
+    server::roles::ensure_can_write_page(&user, "export").map_err(role_server_error)?;
+    server::storage::export_html_site().map_err(server_error)
 }
 
 #[post("/api/templates/apply")]
@@ -1053,6 +1211,22 @@ fn auth_login_links(providers: &[AuthProviderInfo]) -> Vec<LoginLink> {
             url: auth_login_url(&provider.slug),
         })
         .collect()
+}
+
+fn app_server_url(path: &str) -> String {
+    #[cfg(feature = "desktop")]
+    {
+        return format!(
+            "{}/{}",
+            desktop_server_url().trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    {
+        path.to_owned()
+    }
 }
 
 fn auth_login_url(provider: &str) -> String {

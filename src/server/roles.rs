@@ -13,6 +13,7 @@ use thiserror::Error;
 
 static ROLE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 const PAGE_RESOURCE_TYPE: &str = "wiki_pages";
+const SETTINGS_RESOURCE_TYPE: &str = "wiki_settings";
 const USER_RESOURCE_TYPE: &str = "wiki_users";
 const READ_ACTION: &str = "read";
 const WRITE_ACTION: &str = "write";
@@ -105,6 +106,11 @@ pub fn delete_managed_user(user: &AuthUser, id: &str) -> RoleResult<()> {
     delete_managed_user_with_policy(user, id, &policy)
 }
 
+pub fn ensure_can_manage_settings(user: &AuthUser) -> RoleResult<()> {
+    let policy = RolePolicy::from_env()?;
+    ensure_can_manage_settings_with_policy(user, &policy)
+}
+
 fn ensure_can_write_page_with_policy(
     user: &AuthUser,
     slug: &str,
@@ -161,7 +167,26 @@ fn access_for_user_with_policy(user: &AuthUser, policy: &RolePolicy) -> RoleResu
     Ok(UserAccess {
         role: effective_role_for_user(user, policy, &store)?.map(|role| role.name().to_owned()),
         can_manage_users: can_manage_users(&system, &subject)?,
+        can_manage_settings: can_manage_settings(&system, &subject)?,
     })
+}
+
+fn ensure_can_manage_settings_with_policy(user: &AuthUser, policy: &RolePolicy) -> RoleResult<()> {
+    let _guard = ROLE_LOCK.lock().map_err(|_| RoleAccessError::Lock)?;
+    let mut system = initialized_system(policy)?;
+    let store = UserStore::load(&policy.user_file_path)?;
+    let subject = subject_for_user(user);
+    assign_user_role(&mut system, &subject, user, policy, &store)?;
+
+    if can_manage_settings(&system, &subject)? {
+        Ok(())
+    } else {
+        Err(RoleAccessError::Forbidden {
+            user: user.name.clone(),
+            action: MANAGE_ACTION,
+            resource: "settings".to_owned(),
+        })
+    }
 }
 
 fn list_managed_users_with_policy(
@@ -274,6 +299,7 @@ fn admin_role() -> RoleResult<Role> {
         .with_description("Full wiki administration")
         .add_permission(page_permission(READ_ACTION)?)
         .add_permission(page_permission(WRITE_ACTION)?)
+        .add_permission(settings_permission(MANAGE_ACTION)?)
         .add_permission(user_permission(MANAGE_ACTION)?)
         .add_permission(Permission::try_new("*", "*")?))
 }
@@ -284,6 +310,10 @@ fn page_permission(action: &'static str) -> RoleResult<Permission> {
 
 fn user_permission(action: &'static str) -> RoleResult<Permission> {
     Ok(Permission::try_new(action, USER_RESOURCE_TYPE)?)
+}
+
+fn settings_permission(action: &'static str) -> RoleResult<Permission> {
+    Ok(Permission::try_new(action, SETTINGS_RESOURCE_TYPE)?)
 }
 
 fn ensure_can_manage_users(
@@ -304,6 +334,11 @@ fn ensure_can_manage_users(
 
 fn can_manage_users(system: &RoleSystem<FileStorage>, subject: &Subject) -> RoleResult<bool> {
     let resource = Resource::new_checked("users", USER_RESOURCE_TYPE)?;
+    Ok(system.check_permission(subject, MANAGE_ACTION, &resource)?)
+}
+
+fn can_manage_settings(system: &RoleSystem<FileStorage>, subject: &Subject) -> RoleResult<bool> {
+    let resource = Resource::new_checked("settings", SETTINGS_RESOURCE_TYPE)?;
     Ok(system.check_permission(subject, MANAGE_ACTION, &resource)?)
 }
 
@@ -680,6 +715,58 @@ mod tests {
         let result = ensure_can_write_page_with_policy(&test_user(), "home", &policy);
 
         assert!(matches!(result, Err(RoleAccessError::Forbidden { .. })));
+    }
+
+    #[test]
+    fn ensure_can_manage_settings_should_allow_admin() {
+        let dir = tempdir().expect("temp dir should be created");
+        let policy = RolePolicy {
+            role_file_path: dir.path().join("roles.json"),
+            user_file_path: dir.path().join("users.json"),
+            default_role: None,
+            admin_users: vec!["test@example.com".to_owned()],
+            editor_users: Vec::new(),
+            viewer_users: Vec::new(),
+        };
+
+        let result = ensure_can_manage_settings_with_policy(&test_user(), &policy);
+
+        assert!(result.is_ok(), "admin should manage settings: {result:?}");
+    }
+
+    #[test]
+    fn ensure_can_manage_settings_should_deny_editor() {
+        let dir = tempdir().expect("temp dir should be created");
+        let policy = RolePolicy {
+            role_file_path: dir.path().join("roles.json"),
+            user_file_path: dir.path().join("users.json"),
+            default_role: Some(WikiRole::Editor),
+            admin_users: Vec::new(),
+            editor_users: Vec::new(),
+            viewer_users: Vec::new(),
+        };
+
+        let result = ensure_can_manage_settings_with_policy(&test_user(), &policy);
+
+        assert!(matches!(result, Err(RoleAccessError::Forbidden { .. })));
+    }
+
+    #[test]
+    fn access_for_user_should_include_admin_settings_access() {
+        let dir = tempdir().expect("temp dir should be created");
+        let policy = RolePolicy {
+            role_file_path: dir.path().join("roles.json"),
+            user_file_path: dir.path().join("users.json"),
+            default_role: None,
+            admin_users: vec!["test@example.com".to_owned()],
+            editor_users: Vec::new(),
+            viewer_users: Vec::new(),
+        };
+
+        let access =
+            access_for_user_with_policy(&test_user(), &policy).expect("admin access should load");
+
+        assert!(access.can_manage_settings);
     }
 
     #[test]

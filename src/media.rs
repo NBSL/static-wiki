@@ -14,6 +14,7 @@ pub(crate) fn MediaManager(
 ) -> Element {
     let mut upload_busy = use_signal(|| false);
     let mut dragged_media_path = use_signal(String::new);
+    let mut pending_delete_path = use_signal(String::new);
     let current_path = media_path();
     let breadcrumbs = media_breadcrumbs(&current_path);
     let folder_name = new_folder_name();
@@ -98,6 +99,28 @@ pub(crate) fn MediaManager(
         }
     };
 
+    let delete_media_action = move |request: MediaDeleteRequest| async move {
+        if !can_manage_media {
+            status.set("Sign in as an editor or admin to delete media.".to_owned());
+            return;
+        }
+        if request.path.trim().is_empty() {
+            return;
+        }
+
+        match delete_media_entry(request.path.clone()).await {
+            Ok(()) => {
+                pending_delete_path.set(String::new());
+                refresh_key.set(refresh_key() + 1);
+                status.set(format!(
+                    "Deleted {}.",
+                    media_delete_target_label(&request.path, request.kind)
+                ));
+            }
+            Err(err) => status.set(format!("Delete failed: {err}")),
+        }
+    };
+
     rsx! {
         div { class: "grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]",
             section { class: "rounded-lg border border-stone-200 bg-white p-4 shadow-sm",
@@ -144,11 +167,13 @@ pub(crate) fn MediaManager(
                                     entry,
                                     can_manage_media,
                                     dragged_media_path,
+                                    pending_delete_path,
                                     on_open_folder: move |path: String| {
                                         media_path.set(path);
                                         status.set(String::new());
                                     },
                                     on_move_to_folder: move_media_action,
+                                    on_delete: delete_media_action,
                                 }
                             }
                         }
@@ -194,7 +219,7 @@ pub(crate) fn MediaManager(
                             }
                         }
                         p { class: "text-xs text-slate-500",
-                            "Images and videos are saved under /media/{current_path}"
+                            "Images and videos up to 50 MiB are saved under /media/{current_path}"
                         }
                     }
                 } else {
@@ -211,6 +236,12 @@ pub(crate) fn MediaManager(
 struct MediaMoveRequest {
     source_path: String,
     target_folder: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MediaDeleteRequest {
+    path: String,
+    kind: MediaEntryKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -278,8 +309,10 @@ fn MediaEntryTile(
     entry: MediaEntry,
     can_manage_media: bool,
     mut dragged_media_path: Signal<String>,
+    pending_delete_path: Signal<String>,
     on_open_folder: EventHandler<String>,
     on_move_to_folder: EventHandler<MediaMoveRequest>,
+    on_delete: EventHandler<MediaDeleteRequest>,
 ) -> Element {
     let kind_label = media_kind_label(entry.kind);
     let size_label = format_media_size(entry.size);
@@ -293,9 +326,8 @@ fn MediaEntryTile(
             let path = entry.path.clone();
             let drop_path = entry.path.clone();
             rsx! {
-                button {
+                div {
                     class: folder_tile_class(can_manage_media),
-                    onclick: move |_| on_open_folder.call(path.clone()),
                     ondragover: move |event: dioxus::events::DragEvent| {
                         if can_manage_media {
                             event.prevent_default();
@@ -324,12 +356,23 @@ fn MediaEntryTile(
                             });
                         }
                     },
-                    div { class: "flex min-h-32 items-center justify-center rounded-md bg-stone-50 text-sm font-semibold text-slate-600",
-                        "Folder"
+                    button {
+                        class: "grid w-full gap-3 text-left",
+                        onclick: move |_| on_open_folder.call(path.clone()),
+                        div { class: "flex min-h-32 items-center justify-center rounded-md bg-stone-50 text-sm font-semibold text-slate-600",
+                            "Folder"
+                        }
+                        div { class: "min-w-0",
+                            span { class: "block truncate text-sm font-semibold text-slate-950", "{entry.name}" }
+                            span { class: "block truncate text-xs text-slate-500", "{entry.path}" }
+                        }
                     }
-                    div { class: "min-w-0",
-                        span { class: "block truncate text-sm font-semibold text-slate-950", "{entry.name}" }
-                        span { class: "block truncate text-xs text-slate-500", "{entry.path}" }
+                    MediaEntryActions {
+                        entry_path: entry.path,
+                        entry_kind: entry.kind,
+                        can_manage_media,
+                        pending_delete_path,
+                        on_delete,
                     }
                 }
             }
@@ -362,6 +405,13 @@ fn MediaEntryTile(
                         kind_label,
                         size_label,
                         path_label
+                    }
+                    MediaEntryActions {
+                        entry_path: entry.path,
+                        entry_kind: entry.kind,
+                        can_manage_media,
+                        pending_delete_path,
+                        on_delete,
                     }
                 }
             }
@@ -396,6 +446,13 @@ fn MediaEntryTile(
                         size_label,
                         path_label
                     }
+                    MediaEntryActions {
+                        entry_path: entry.path,
+                        entry_kind: entry.kind,
+                        can_manage_media,
+                        pending_delete_path,
+                        on_delete,
+                    }
                 }
             }
         }
@@ -415,6 +472,55 @@ fn media_file_tile_class(can_manage_media: bool) -> &'static str {
         "grid min-h-48 cursor-grab gap-3 rounded-lg border border-stone-200 bg-white p-3 active:cursor-grabbing"
     } else {
         "grid min-h-48 gap-3 rounded-lg border border-stone-200 bg-white p-3"
+    }
+}
+
+#[component]
+fn MediaEntryActions(
+    entry_path: String,
+    entry_kind: MediaEntryKind,
+    can_manage_media: bool,
+    mut pending_delete_path: Signal<String>,
+    on_delete: EventHandler<MediaDeleteRequest>,
+) -> Element {
+    if !can_manage_media {
+        return rsx! {};
+    }
+
+    let is_pending_delete = pending_delete_path() == entry_path;
+    let confirm_path = entry_path.clone();
+    let cancel_path = entry_path.clone();
+
+    rsx! {
+        div { class: "flex flex-wrap justify-end gap-2",
+            if is_pending_delete {
+                button {
+                    class: "inline-flex h-8 items-center rounded-md border border-red-700 bg-red-700 px-2 text-xs font-semibold text-white hover:bg-red-800",
+                    onclick: move |_| {
+                        on_delete.call(MediaDeleteRequest {
+                            path: confirm_path.clone(),
+                            kind: entry_kind,
+                        });
+                    },
+                    "Confirm"
+                }
+                button {
+                    class: "inline-flex h-8 items-center rounded-md border border-stone-300 bg-white px-2 text-xs font-semibold text-slate-800 hover:border-stone-400",
+                    onclick: move |_| {
+                        pending_delete_path.set(String::new());
+                    },
+                    "Cancel"
+                }
+            } else {
+                button {
+                    class: "inline-flex h-8 items-center rounded-md border border-red-200 bg-white px-2 text-xs font-semibold text-red-700 hover:border-red-300",
+                    onclick: move |_| {
+                        pending_delete_path.set(cancel_path.clone());
+                    },
+                    "Delete"
+                }
+            }
+        }
     }
 }
 
@@ -523,6 +629,13 @@ fn media_folder_label(path: &str) -> String {
     }
 }
 
+fn media_delete_target_label(path: &str, kind: MediaEntryKind) -> String {
+    match kind {
+        MediaEntryKind::Folder => format!("folder {}", media_file_name(path)),
+        MediaEntryKind::Image | MediaEntryKind::Video => media_file_name(path).to_owned(),
+    }
+}
+
 #[post("/api/media/list")]
 pub(crate) async fn list_media_entries(path: String) -> ServerFnResult<MediaListing> {
     crate::server::storage::list_media(&path).map_err(media_storage_error)
@@ -555,6 +668,13 @@ async fn move_media_file(source_path: String, target_folder: String) -> ServerFn
         .map_err(media_storage_error)
 }
 
+#[post("/api/media/delete", headers: dioxus::fullstack::HeaderMap)]
+async fn delete_media_entry(path: String) -> ServerFnResult<()> {
+    let user = authenticated_user_from_headers(&headers)?;
+    crate::server::roles::ensure_can_write_page(&user, "media").map_err(role_server_error)?;
+    crate::server::storage::delete_media_entry(&path, &user).map_err(media_storage_error)
+}
+
 #[cfg(feature = "server")]
 fn authenticated_user_from_headers(
     headers: &dioxus::fullstack::HeaderMap,
@@ -573,7 +693,9 @@ fn media_storage_error(err: crate::server::storage::StorageError) -> ServerFnErr
     let code = match err {
         crate::server::storage::StorageError::InvalidMediaPath(_)
         | crate::server::storage::StorageError::UnsupportedMediaType(_) => 400,
-        crate::server::storage::StorageError::MediaFileNotFound(_)
+        crate::server::storage::StorageError::MediaFileTooLarge { .. } => 413,
+        crate::server::storage::StorageError::MediaEntryNotFound(_)
+        | crate::server::storage::StorageError::MediaFileNotFound(_)
         | crate::server::storage::StorageError::MediaFolderNotFound(_) => 404,
         crate::server::storage::StorageError::MediaFileExists(_)
         | crate::server::storage::StorageError::MediaFolderExists(_) => 409,

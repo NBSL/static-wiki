@@ -14,6 +14,7 @@ pub struct AuthUser {
 pub struct UserAccess {
     pub role: Option<String>,
     pub can_manage_users: bool,
+    pub can_manage_settings: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

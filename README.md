@@ -1,6 +1,7 @@
 # XP Static Wiki
 
 A Dioxus fullstack wiki written in Rust. Pages are Markdown files stored in a local Git repository, page edits are committed with the authenticated user as author, and revision diffs are generated with `git2`.
+The page sidebar is sorted by page creation time, oldest first.
 
 ## Run
 
@@ -24,7 +25,19 @@ Login sessions are stored in `XP_WIKI_SESSION_FILE`, defaulting to `wiki-data/se
 
 Page templates are Markdown files in `wiki-data/templates`. The first `# Heading` is used as the template name in the editor, and the remaining Markdown is copied into new page drafts. Templates can include `{{title}}` and `{{slug}}` placeholders, which are replaced when an editor applies the template.
 
-The page editor includes Builder and Markdown modes. Builder mode inserts common page blocks through form controls, including sections, paragraphs, images, table-of-contents blocks, callouts, infoboxes, and item cards. The generated content is still Markdown, so pages continue to save as local `.md` files with normal Git history.
+Pages can declare categories in a leading front matter block. Category names are normalized like slugs, so `test page`, `test_page`, and `test-page` all match `test-page`:
+
+```markdown
+---
+categories: [test-page, npc]
+---
+
+# Example Page
+```
+
+Use `{{category:test-page}}` in page Markdown to render a list of pages in that category. Bare category shortcodes such as `{{test_page}}` are also supported; `{{title}}` and `{{slug}}` remain reserved for templates.
+
+The page editor includes Builder and Markdown modes. Builder mode inserts common page blocks through form controls, including sections, paragraphs, images, table-of-contents blocks, callouts, infoboxes, item cards, and NPC cards. NPC card portraits can be selected from a popup media picker. The generated content is still Markdown, so pages continue to save as local `.md` files with normal Git history.
 
 Pages can include a MediaWiki-style infobox with a fenced `infobox` block. The `infocard` and `info-card` aliases work too. Values are escaped when rendered, so editors should write plain text rather than HTML:
 
@@ -40,7 +53,9 @@ Known for: AC power
 
 For local wiki media, put image files in `wiki-data/media` or the repo-level `media` folder and use `image: filename.ext`. The `/media` route looks in those folders first and then in the app `assets` directory, so existing bundled images can use the same filename style. You can also use an `https://` URL.
 
-The Media tab browses files under `wiki-data/media`. Editors and admins can create folders, upload image or video files, and drag media files onto folder tiles to move them. Uploads and moves are saved into Git history and served from `/media/path/to/file.ext`.
+The Media tab browses files under `wiki-data/media`. Editors and admins can create folders, upload image or video files up to 50 MiB each, drag media files onto folder tiles to move them, and delete files or folders with a confirmation step. Uploads, moves, and deletes are saved into Git history and served from `/media/path/to/file.ext`.
+
+Editors and admins can use `Export HTML` to generate a static copy of the wiki at `wiki-data/export/latest`. The export writes root-level page HTML files, `assets/tailwind.css`, and copied media, and the running app serves the latest export from `/exports/latest/index.html`.
 
 Pages can include a table of contents with a fenced `toc` block. It adds heading anchors automatically and includes `##` through `######` headings by default:
 
@@ -112,7 +127,7 @@ line: Race: ALL
 ```
 ````
 
-Roles are managed with `role-system` using its filesystem backend at `XP_WIKI_ROLE_FILE`. The app bootstraps `admin`, `editor`, and `viewer` roles there. Authenticated users are tracked in `XP_WIKI_USER_FILE`, and admins can assign `admin`, `editor`, `viewer`, or `none` from the Users tab.
+Roles are managed with `role-system` using its filesystem backend at `XP_WIKI_ROLE_FILE`. The app bootstraps `admin`, `editor`, and `viewer` roles there. Authenticated users are tracked in `XP_WIKI_USER_FILE`, and admins can assign `admin`, `editor`, `viewer`, or `none` from the Users tab. The Settings tab is locked to admins and shows the runtime storage, auth, role, and upload-limit configuration.
 
 Users listed in `XP_WIKI_ADMIN_USERS`, `XP_WIKI_EDITOR_USERS`, or `XP_WIKI_VIEWER_USERS` are locked by `.env` and cannot be changed from the UI. `XP_WIKI_DEFAULT_ROLE` is used for authenticated users without an explicit managed role.
 

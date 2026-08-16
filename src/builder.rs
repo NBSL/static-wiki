@@ -1,3 +1,5 @@
+use crate::media::list_media_entries;
+use crate::models::{MediaEntry, MediaEntryKind};
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +84,12 @@ struct BuilderDraft {
     list_items: String,
     tags: String,
     icon: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BuilderMediaCrumb {
+    label: String,
+    path: String,
 }
 
 fn markdown_block_from_builder_draft(draft: &BuilderDraft) -> String {
@@ -450,10 +458,12 @@ pub(crate) fn PageBuilder(editor_markdown: Signal<String>) -> Element {
                 },
                 BuilderBlockKind::Infobox => rsx! {
                     div { class: "grid gap-3 md:grid-cols-2",
-                        BuilderTextInput {
+                        BuilderMediaImagePicker {
                             label: "Image",
                             value: image,
-                            placeholder: "Optional image"
+                            empty_label: "No image selected",
+                            dialog_title: "Choose Image",
+                            preview_alt: "Selected image"
                         }
                         BuilderTextInput {
                             label: "Alt",
@@ -498,10 +508,12 @@ pub(crate) fn PageBuilder(editor_markdown: Signal<String>) -> Element {
                 },
                 BuilderBlockKind::NpcCard => rsx! {
                     div { class: "grid gap-3 md:grid-cols-2",
-                        BuilderTextInput {
+                        BuilderMediaImagePicker {
                             label: "Portrait",
                             value: image,
-                            placeholder: "filename.jpg or https://..."
+                            empty_label: "No portrait selected",
+                            dialog_title: "Choose Portrait",
+                            preview_alt: "Selected portrait"
                         }
                         BuilderTextInput {
                             label: "Role",
@@ -578,6 +590,255 @@ fn BuilderTextarea(
     }
 }
 
+#[component]
+fn BuilderMediaImagePicker(
+    label: &'static str,
+    mut value: Signal<String>,
+    empty_label: &'static str,
+    dialog_title: &'static str,
+    preview_alt: &'static str,
+) -> Element {
+    let mut picker_path = use_signal(String::new);
+    let mut refresh_key = use_signal(|| 0_u64);
+    let mut picker_open = use_signal(|| false);
+    let media_resource = use_resource(move || async move {
+        let _ = refresh_key();
+        list_media_entries(picker_path()).await
+    });
+    let selected_value = value();
+    let selected_is_empty = selected_value.trim().is_empty();
+    let selected_label = if selected_is_empty {
+        empty_label.to_owned()
+    } else {
+        selected_value.clone()
+    };
+    let preview_src = builder_media_preview_src(&selected_value);
+    let current_path = picker_path();
+    let breadcrumbs = builder_media_breadcrumbs(&current_path);
+    let media_state = media_resource();
+
+    rsx! {
+        div { class: "grid gap-2 text-sm font-semibold text-slate-700",
+            span { "{label}" }
+            div { class: "flex min-h-20 items-center gap-3 rounded-md border border-stone-300 bg-white p-2",
+                match preview_src {
+                    Some(src) => rsx! {
+                        div { class: "h-16 w-16 shrink-0 overflow-hidden rounded-md bg-stone-100",
+                            img {
+                                class: "h-full w-full object-cover",
+                                src: "{src}",
+                                alt: "{preview_alt}"
+                            }
+                        }
+                    },
+                    None => rsx! {
+                        div { class: "flex h-16 w-16 shrink-0 items-center justify-center rounded-md bg-stone-100 text-xs font-semibold text-slate-500",
+                            "None"
+                        }
+                    },
+                }
+                div { class: "min-w-0 flex-1",
+                    span { class: "block truncate text-sm font-semibold text-slate-900", "{selected_label}" }
+                }
+                button {
+                    class: "inline-flex h-9 shrink-0 items-center rounded-md border border-emerald-700 bg-emerald-700 px-3 text-sm font-semibold text-white hover:bg-emerald-800",
+                    onclick: move |_| picker_open.set(true),
+                    "Choose"
+                }
+                if !selected_is_empty {
+                    button {
+                        class: "inline-flex h-9 shrink-0 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
+                        onclick: move |_| value.set(String::new()),
+                        "Clear"
+                    }
+                }
+            }
+
+            if picker_open() {
+                div { class: "fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4",
+                    div { class: "grid max-h-[90vh] w-full max-w-3xl grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden rounded-lg bg-white shadow-xl",
+                        div { class: "flex items-center justify-between gap-3 border-b border-stone-200 px-4 py-3",
+                            div { class: "min-w-0",
+                                h3 { class: "truncate text-base font-semibold text-slate-950", "{dialog_title}" }
+                                p { class: "truncate text-xs font-medium text-slate-500", "{current_path}" }
+                            }
+                            button {
+                                class: "inline-flex h-9 shrink-0 items-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-slate-800 hover:border-stone-400",
+                                onclick: move |_| picker_open.set(false),
+                                "Close"
+                            }
+                        }
+
+                        div { class: "flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 px-4 py-3",
+                            div { class: "flex flex-wrap items-center gap-1 text-xs",
+                                for crumb in breadcrumbs {
+                                    BuilderMediaCrumbButton {
+                                        key: "{crumb.path}",
+                                        crumb,
+                                        current_path: current_path.clone(),
+                                        on_select: move |path: String| picker_path.set(path),
+                                    }
+                                }
+                            }
+                            button {
+                                class: "inline-flex h-8 items-center rounded-md border border-stone-300 bg-white px-2 text-xs font-semibold text-slate-800 hover:border-stone-400",
+                                onclick: move |_| refresh_key.set(refresh_key() + 1),
+                                "Refresh"
+                            }
+                        }
+
+                        div { class: "overflow-y-auto bg-stone-50 p-4",
+                            match media_state {
+                                Some(Ok(listing)) => {
+                                    let entries = listing
+                                        .entries
+                                        .into_iter()
+                                        .filter(media_entry_is_builder_picker_option)
+                                        .collect::<Vec<_>>();
+                                    rsx! {
+                                        if entries.is_empty() {
+                                            div { class: "rounded-md border border-dashed border-stone-300 bg-white p-6 text-sm text-slate-500",
+                                                "No folders or images in this folder"
+                                            }
+                                        } else {
+                                            div { class: "grid gap-3 sm:grid-cols-2 lg:grid-cols-3",
+                                                for entry in entries {
+                                                    BuilderMediaPickerEntry {
+                                                        key: "{entry.path}",
+                                                        entry,
+                                                        selected_path: selected_value.clone(),
+                                                        on_open_folder: move |path: String| picker_path.set(path),
+                                                        on_select_image: move |path: String| {
+                                                            value.set(path);
+                                                            picker_open.set(false);
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                Some(Err(err)) => rsx! {
+                                    p { class: "rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800", "{err}" }
+                                },
+                                None => rsx! {
+                                    p { class: "rounded-md border border-stone-200 bg-white p-3 text-sm text-slate-500", "Loading media" }
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BuilderMediaCrumbButton(
+    crumb: BuilderMediaCrumb,
+    current_path: String,
+    on_select: EventHandler<String>,
+) -> Element {
+    let is_current = crumb.path == current_path;
+    let path = crumb.path.clone();
+
+    rsx! {
+        if is_current {
+            span { class: "rounded-md bg-slate-100 px-2 py-1 font-semibold text-slate-800", "{crumb.label}" }
+        } else {
+            button {
+                class: "rounded-md px-2 py-1 font-semibold text-emerald-800 hover:bg-emerald-50",
+                onclick: move |_| on_select.call(path.clone()),
+                "{crumb.label}"
+            }
+        }
+    }
+}
+
+#[component]
+fn BuilderMediaPickerEntry(
+    entry: MediaEntry,
+    selected_path: String,
+    on_open_folder: EventHandler<String>,
+    on_select_image: EventHandler<String>,
+) -> Element {
+    match entry.kind {
+        MediaEntryKind::Folder => {
+            let path = entry.path.clone();
+            rsx! {
+                button {
+                    class: "grid gap-2 rounded-md border border-stone-200 bg-white p-2 text-left hover:border-emerald-700",
+                    onclick: move |_| on_open_folder.call(path.clone()),
+                    div { class: "flex h-24 items-center justify-center rounded-md bg-stone-100 text-xs font-semibold text-slate-600",
+                        "Folder"
+                    }
+                    span { class: "truncate text-xs font-semibold text-slate-800", "{entry.name}" }
+                }
+            }
+        }
+        MediaEntryKind::Image => {
+            let path = entry.path.clone();
+            let url = entry.url.unwrap_or_else(|| format!("/media/{path}"));
+            let class = if selected_path == path {
+                "grid gap-2 rounded-md border border-emerald-700 bg-emerald-50 p-2 text-left"
+            } else {
+                "grid gap-2 rounded-md border border-stone-200 bg-white p-2 text-left hover:border-emerald-700"
+            };
+
+            rsx! {
+                button {
+                    class,
+                    onclick: move |_| on_select_image.call(path.clone()),
+                    div { class: "overflow-hidden rounded-md bg-stone-100",
+                        img {
+                            class: "h-24 w-full object-cover",
+                            src: "{url}",
+                            alt: "{entry.name}"
+                        }
+                    }
+                    span { class: "truncate text-xs font-semibold text-slate-800", "{entry.name}" }
+                }
+            }
+        }
+        MediaEntryKind::Video => rsx! {},
+    }
+}
+
+fn builder_media_breadcrumbs(path: &str) -> Vec<BuilderMediaCrumb> {
+    let mut crumbs = vec![BuilderMediaCrumb {
+        label: "Media".to_owned(),
+        path: String::new(),
+    }];
+    let mut current = Vec::new();
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        current.push(segment);
+        crumbs.push(BuilderMediaCrumb {
+            label: segment.to_owned(),
+            path: current.join("/"),
+        });
+    }
+    crumbs
+}
+
+fn builder_media_preview_src(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else if value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with("/media/")
+        || value.starts_with("/assets/")
+    {
+        Some(value.to_owned())
+    } else {
+        Some(format!("/media/{}", value.trim_start_matches('/')))
+    }
+}
+
+fn media_entry_is_builder_picker_option(entry: &MediaEntry) -> bool {
+    matches!(entry.kind, MediaEntryKind::Folder | MediaEntryKind::Image)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +882,23 @@ mod tests {
     }
 
     #[test]
+    fn markdown_block_from_builder_draft_should_create_infobox_fence() {
+        let mut draft = draft(BuilderBlockKind::Infobox);
+        draft.title = "Nikola Tesla".to_owned();
+        draft.image = "portraits/tesla.jpg".to_owned();
+        draft.alt = "Nikola Tesla portrait".to_owned();
+        draft.caption = "Tesla around 1890".to_owned();
+        draft.rows = "Born: 10 July 1856".to_owned();
+
+        let markdown = markdown_block_from_builder_draft(&draft);
+
+        assert_eq!(
+            markdown,
+            "```infobox\ntitle: Nikola Tesla\nimage: portraits/tesla.jpg\nalt: Nikola Tesla portrait\ncaption: Tesla around 1890\nBorn: 10 July 1856\n```"
+        );
+    }
+
+    #[test]
     fn markdown_block_from_builder_draft_should_create_item_card_fence() {
         let mut draft = draft(BuilderBlockKind::ItemCard);
         draft.title = "Amulet".to_owned();
@@ -652,5 +930,48 @@ mod tests {
             markdown,
             "```npc-card\nname: Captain Veyra\nportrait: veyra.png\nrole: Harbor Guard\ntraits: Stern | Loyal\nFaction: Port Authority\n```"
         );
+    }
+
+    #[test]
+    fn builder_media_preview_src_should_map_bare_paths_to_media_route() {
+        let src = builder_media_preview_src("portraits/veyra.webp");
+
+        assert_eq!(src.as_deref(), Some("/media/portraits/veyra.webp"));
+    }
+
+    #[test]
+    fn builder_media_breadcrumbs_should_include_nested_media_paths() {
+        let crumbs = builder_media_breadcrumbs("npc/portraits");
+
+        assert_eq!(
+            crumbs,
+            vec![
+                BuilderMediaCrumb {
+                    label: "Media".to_owned(),
+                    path: String::new(),
+                },
+                BuilderMediaCrumb {
+                    label: "npc".to_owned(),
+                    path: "npc".to_owned(),
+                },
+                BuilderMediaCrumb {
+                    label: "portraits".to_owned(),
+                    path: "npc/portraits".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn media_entry_is_builder_picker_option_should_exclude_videos() {
+        let entry = MediaEntry {
+            name: "intro.mp4".to_owned(),
+            path: "intro.mp4".to_owned(),
+            kind: MediaEntryKind::Video,
+            size: Some(10),
+            url: Some("/media/intro.mp4".to_owned()),
+        };
+
+        assert!(!media_entry_is_builder_picker_option(&entry));
     }
 }

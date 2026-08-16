@@ -10,6 +10,8 @@ pub struct AuthProviderInfo {
 pub struct PageSummary {
     pub slug: String,
     pub title: String,
+    pub categories: Vec<String>,
+    pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub updated_by: Option<String>,
 }
@@ -19,6 +21,9 @@ pub struct PageDetail {
     pub slug: String,
     pub title: String,
     pub markdown: String,
+    pub rendered_markdown: String,
+    pub categories: Vec<String>,
+    pub created_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub updated_by: Option<String>,
 }
@@ -57,6 +62,30 @@ pub struct MediaListing {
     pub path: String,
     pub parent: Option<String>,
     pub entries: Vec<MediaEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct HtmlExport {
+    pub path: String,
+    pub url: String,
+    pub page_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SettingsOverview {
+    pub current_role: String,
+    pub data_dir: String,
+    pub pages_dir: String,
+    pub templates_dir: String,
+    pub components_dir: String,
+    pub media_dir: String,
+    pub export_dir: String,
+    pub role_file: String,
+    pub user_file: String,
+    pub session_file: String,
+    pub default_role: String,
+    pub media_upload_limit: String,
+    pub configured_auth_providers: Vec<AuthProviderInfo>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

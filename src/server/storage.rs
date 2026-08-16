@@ -1,7 +1,9 @@
-use crate::markdown::{humanize_slug, title_from_markdown};
+use crate::markdown::{
+    humanize_slug, render_markdown_with_component_manifests, title_from_markdown,
+};
 use crate::models::{
-    DiffLine, DiffLineKind, MediaEntry, MediaEntryKind, MediaListing, PageDetail, PageDiff,
-    PageRevision, PageSummary, PageTemplateDraft, PageTemplateSummary,
+    DiffLine, DiffLineKind, HtmlExport, MediaEntry, MediaEntryKind, MediaListing, PageDetail,
+    PageDiff, PageRevision, PageSummary, PageTemplateDraft, PageTemplateSummary,
 };
 use crate::slug::{is_valid_slug, normalize_slug};
 use crate::user::AuthUser;
@@ -10,6 +12,7 @@ use git2::{
     Signature, Tree,
 };
 use once_cell::sync::Lazy;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str;
@@ -22,6 +25,10 @@ const PAGES_DIR: &str = "pages";
 const TEMPLATES_DIR: &str = "templates";
 const MEDIA_DIR: &str = "media";
 const COMPONENTS_DIR: &str = "components";
+const EXPORT_DIR: &str = "export";
+const EXPORT_LATEST_DIR: &str = "latest";
+pub(crate) const MEDIA_FILE_MAX_BYTES: usize = 50 * 1024 * 1024;
+const EXPORT_TAILWIND_CSS: &str = include_str!("../../assets/tailwind.css");
 const DEFAULT_HOME: &str = "# Home\n\nWelcome to your Rust and Dioxus wiki.\n";
 const DEFAULT_TEMPLATES: [(&str, &str); 3] = [
     (
@@ -60,6 +67,10 @@ pub enum StorageError {
     MediaFileNotFound(String),
     #[error("media file `{0}` already exists")]
     MediaFileExists(String),
+    #[error("media entry `{0}` was not found")]
+    MediaEntryNotFound(String),
+    #[error("media file is too large ({size} bytes, maximum {limit} bytes)")]
+    MediaFileTooLarge { size: usize, limit: usize },
     #[error("unsupported media type `{0}`")]
     UnsupportedMediaType(String),
     #[error("history entry is not valid UTF-8")]
@@ -114,12 +125,20 @@ pub fn move_media_file(
     with_store(|store| store.move_media_file(source_path, target_folder, user))
 }
 
+pub fn delete_media_entry(path: &str, user: &AuthUser) -> StorageResult<()> {
+    with_store(|store| store.delete_media_entry(path, user))
+}
+
 pub fn list_templates() -> StorageResult<Vec<PageTemplateSummary>> {
     with_store(|store| store.list_templates())
 }
 
 pub fn list_component_manifests() -> StorageResult<Vec<String>> {
     with_store(|store| store.list_component_manifests())
+}
+
+pub fn export_html_site() -> StorageResult<HtmlExport> {
+    with_store(|store| store.export_html_site())
 }
 
 pub fn page_template_draft(
@@ -143,6 +162,11 @@ pub fn media_dir() -> PathBuf {
 }
 
 pub struct MediaFile {
+    pub contents: Vec<u8>,
+    pub content_type: &'static str,
+}
+
+pub struct ExportFile {
     pub contents: Vec<u8>,
     pub content_type: &'static str,
 }
@@ -182,6 +206,33 @@ fn read_media_file_from_roots(
     }
 
     Ok(None)
+}
+
+pub fn read_export_file(request_path: &str) -> StorageResult<Option<ExportFile>> {
+    read_export_file_from_root(request_path, data_dir().join(EXPORT_DIR))
+}
+
+fn read_export_file_from_root(
+    request_path: &str,
+    export_root: impl AsRef<Path>,
+) -> StorageResult<Option<ExportFile>> {
+    let Some(rel_path) = safe_export_rel_path(request_path) else {
+        return Ok(None);
+    };
+
+    let mut path = export_root.as_ref().join(rel_path);
+    if path.is_dir() {
+        path = path.join("index.html");
+    }
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let content_type = export_content_type(&path);
+    Ok(Some(ExportFile {
+        contents: fs::read(path)?,
+        content_type,
+    }))
 }
 
 fn with_store<T>(operation: impl FnOnce(&WikiStore) -> StorageResult<T>) -> StorageResult<T> {
@@ -275,18 +326,29 @@ impl WikiStore {
             let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if let Some(page) = self.read_page(slug)? {
-                pages.push(PageSummary {
-                    slug: page.slug,
-                    title: page.title,
-                    updated_at: page.updated_at,
-                    updated_by: page.updated_by,
-                });
+            if !is_valid_slug(slug) {
+                continue;
             }
+            let markdown = fs::read_to_string(&path)?;
+            pages.push(self.page_summary_from_markdown(slug, &markdown)?);
         }
 
-        pages.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        sort_pages_by_creation_time(&mut pages);
         Ok(pages)
+    }
+
+    fn page_summary_from_markdown(&self, slug: &str, markdown: &str) -> StorageResult<PageSummary> {
+        validate_slug(slug)?;
+        let history = self.page_history(slug)?;
+        let latest = history.first();
+        Ok(PageSummary {
+            slug: slug.to_owned(),
+            title: title_from_markdown(markdown, slug),
+            categories: page_categories_from_markdown(markdown),
+            created_at: history.last().map(|revision| revision.timestamp),
+            updated_at: latest.map(|revision| revision.timestamp),
+            updated_by: latest.map(|revision| revision.author.clone()),
+        })
     }
 
     pub fn list_templates(&self) -> StorageResult<Vec<PageTemplateSummary>> {
@@ -350,6 +412,55 @@ impl WikiStore {
         Ok(manifests)
     }
 
+    pub fn export_html_site(&self) -> StorageResult<HtmlExport> {
+        let export_dir = self.root.join(EXPORT_DIR).join(EXPORT_LATEST_DIR);
+        if export_dir.exists() {
+            fs::remove_dir_all(&export_dir)?;
+        }
+        fs::create_dir_all(export_dir.join("assets"))?;
+        fs::create_dir_all(export_dir.join("media"))?;
+        fs::write(
+            export_dir.join("assets").join("tailwind.css"),
+            EXPORT_TAILWIND_CSS,
+        )?;
+
+        let pages = self.export_pages()?;
+        let manifests = self.list_component_manifests()?;
+        let page_summaries = page_summaries_from_details(&pages);
+        for page in &pages {
+            let expanded =
+                expand_category_shortcodes(page_render_body(&page.markdown), &page_summaries);
+            let rendered = render_markdown_with_component_manifests(&expanded, &manifests);
+            let rendered = rewrite_export_asset_paths(&rendered);
+            let html = export_page_html(page, &pages, &rendered);
+            fs::write(export_dir.join(export_page_file_name(&page.slug)), html)?;
+        }
+
+        let index_html = match pages
+            .iter()
+            .find(|page| page.slug == "home")
+            .or_else(|| pages.first())
+        {
+            Some(page) => {
+                let expanded =
+                    expand_category_shortcodes(page_render_body(&page.markdown), &page_summaries);
+                let rendered = render_markdown_with_component_manifests(&expanded, &manifests);
+                let rendered = rewrite_export_asset_paths(&rendered);
+                export_page_html(page, &pages, &rendered)
+            }
+            None => export_empty_index_html(),
+        };
+        fs::write(export_dir.join("index.html"), index_html)?;
+
+        copy_export_media(&self.root, &export_dir)?;
+
+        Ok(HtmlExport {
+            path: export_dir.display().to_string(),
+            url: format!("/exports/{EXPORT_LATEST_DIR}/index.html"),
+            page_count: pages.len(),
+        })
+    }
+
     pub fn page_template_draft(
         &self,
         template_slug: &str,
@@ -383,13 +494,20 @@ impl WikiStore {
         }
 
         let markdown = fs::read_to_string(path)?;
-        let latest = self.page_history(slug)?.into_iter().next();
+        let summary = self.page_summary_from_markdown(slug, &markdown)?;
+        let category_pages = self.list_pages()?;
+        let rendered_markdown =
+            expand_category_shortcodes(page_render_body(&markdown), &category_pages);
+
         Ok(Some(PageDetail {
-            slug: slug.to_owned(),
-            title: title_from_markdown(&markdown, slug),
+            slug: summary.slug,
+            title: summary.title,
             markdown,
-            updated_at: latest.as_ref().map(|revision| revision.timestamp),
-            updated_by: latest.map(|revision| revision.author),
+            rendered_markdown,
+            categories: summary.categories,
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+            updated_by: summary.updated_by,
         }))
     }
 
@@ -536,6 +654,7 @@ impl WikiStore {
         if media_content_type(Path::new(&filename)).is_none() {
             return Err(StorageError::UnsupportedMediaType(filename));
         }
+        validate_media_file_size(contents.len())?;
 
         let folder_path = self.root.join(MEDIA_DIR).join(&folder_rel_path);
         if !folder_path.exists() {
@@ -617,6 +736,33 @@ impl WikiStore {
         )?;
 
         Ok(())
+    }
+
+    pub fn delete_media_entry(&self, path: &str, user: &AuthUser) -> StorageResult<()> {
+        let rel_path = safe_media_rel_path(path)
+            .ok_or_else(|| StorageError::InvalidMediaPath(path.to_owned()))?;
+        let full_path = self.root.join(MEDIA_DIR).join(&rel_path);
+        let display_path = display_media_path(&rel_path);
+
+        if full_path.is_file() {
+            if media_content_type(&full_path).is_none() {
+                return Err(StorageError::UnsupportedMediaType(display_path));
+            }
+
+            fs::remove_file(full_path)?;
+            self.ensure_empty_media_folder_placeholder(&rel_path)?;
+            self.commit_media_change(&format!("Delete media {display_path}"), user)?;
+            return Ok(());
+        }
+
+        if full_path.is_dir() {
+            fs::remove_dir_all(full_path)?;
+            self.ensure_empty_media_folder_placeholder(&rel_path)?;
+            self.commit_media_change(&format!("Delete media folder {display_path}"), user)?;
+            return Ok(());
+        }
+
+        Err(StorageError::MediaEntryNotFound(display_path))
     }
 
     pub fn page_history(&self, slug: &str) -> StorageResult<Vec<PageRevision>> {
@@ -734,6 +880,7 @@ impl WikiStore {
     fn commit_media_change(&self, message: &str, user: &AuthUser) -> StorageResult<()> {
         let mut index = self.repo.index()?;
         index.add_all([MEDIA_DIR], IndexAddOption::DEFAULT, None)?;
+        index.update_all([MEDIA_DIR], None)?;
         index.write()?;
         let tree_id = index.write_tree()?;
         let tree = self.repo.find_tree(tree_id)?;
@@ -753,6 +900,19 @@ impl WikiStore {
         Ok(())
     }
 
+    fn ensure_empty_media_folder_placeholder(&self, deleted_rel_path: &Path) -> StorageResult<()> {
+        let Some(parent_rel_path) = deleted_rel_path.parent() else {
+            return Ok(());
+        };
+        let parent_path = self.root.join(MEDIA_DIR).join(parent_rel_path);
+        if !parent_path.is_dir() || parent_path.read_dir()?.next().is_some() {
+            return Ok(());
+        }
+
+        fs::write(parent_path.join(".gitkeep"), "")?;
+        Ok(())
+    }
+
     fn page_path(&self, slug: &str) -> StorageResult<PathBuf> {
         validate_slug(slug)?;
         Ok(self.root.join(page_rel_path(slug)))
@@ -766,6 +926,16 @@ impl WikiStore {
     fn component_path(&self, slug: &str) -> StorageResult<PathBuf> {
         validate_slug(slug)?;
         Ok(self.root.join(component_rel_path(slug)))
+    }
+
+    fn export_pages(&self) -> StorageResult<Vec<PageDetail>> {
+        let mut pages = Vec::new();
+        for page in self.list_pages()? {
+            if let Some(page) = self.read_page(&page.slug)? {
+                pages.push(page);
+            }
+        }
+        Ok(pages)
     }
 }
 
@@ -787,6 +957,184 @@ fn template_rel_path(slug: &str) -> PathBuf {
 
 fn component_rel_path(slug: &str) -> PathBuf {
     PathBuf::from(COMPONENTS_DIR).join(format!("{slug}.json"))
+}
+
+fn sort_pages_by_creation_time(pages: &mut [PageSummary]) {
+    pages.sort_by(|left, right| {
+        let left_created_at = left.created_at.unwrap_or(i64::MAX);
+        let right_created_at = right.created_at.unwrap_or(i64::MAX);
+        left_created_at
+            .cmp(&right_created_at)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+}
+
+fn page_categories_from_markdown(markdown: &str) -> Vec<String> {
+    crate::markdown::category_slugs_from_markdown(markdown)
+}
+
+fn page_render_body(markdown: &str) -> &str {
+    split_page_front_matter(markdown)
+        .map(|(_front_matter, body)| body.trim_start())
+        .unwrap_or(markdown)
+}
+
+fn split_page_front_matter(markdown: &str) -> Option<(&str, &str)> {
+    let mut offset = 0;
+    let mut lines = markdown.split_inclusive('\n');
+    let first = lines.next()?;
+    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
+        return None;
+    }
+    offset += first.len();
+    let front_matter_start = offset;
+
+    for line in lines {
+        let line_start = offset;
+        offset += line.len();
+        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
+            return Some((
+                &markdown[front_matter_start..line_start],
+                &markdown[offset..],
+            ));
+        }
+    }
+
+    None
+}
+
+fn expand_category_shortcodes(markdown: &str, pages: &[PageSummary]) -> String {
+    let mut expanded = String::with_capacity(markdown.len());
+    let mut remaining = markdown;
+
+    while let Some(start) = remaining.find("{{") {
+        expanded.push_str(&remaining[..start]);
+        let after_open = &remaining[start + 2..];
+        let Some(end) = after_open.find("}}") else {
+            expanded.push_str(&remaining[start..]);
+            return expanded;
+        };
+
+        let token = &after_open[..end];
+        if let Some(category) = category_slug_from_shortcode(token) {
+            expanded.push_str(&category_page_list_markdown(&category, pages));
+        } else {
+            expanded.push_str(&remaining[start..start + 2 + end + 2]);
+        }
+        remaining = &after_open[end + 2..];
+    }
+
+    expanded.push_str(remaining);
+    expanded
+}
+
+fn category_slug_from_shortcode(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.eq_ignore_ascii_case("title") || token.eq_ignore_ascii_case("slug") {
+        return None;
+    }
+
+    if let Some(category) = token.strip_prefix("category:") {
+        normalize_slug(category)
+    } else if token.contains(':') {
+        None
+    } else {
+        normalize_slug(token)
+    }
+}
+
+fn category_page_list_markdown(category: &str, pages: &[PageSummary]) -> String {
+    let matches = pages
+        .iter()
+        .filter(|page| {
+            page.categories
+                .iter()
+                .any(|candidate| candidate == category)
+        })
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return format!("_No pages in category `{category}`._");
+    }
+
+    matches
+        .iter()
+        .map(|page| format!("- {} (`{}`)", escape_markdown_text(&page.title), page.slug))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape_markdown_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn page_summaries_from_details(pages: &[PageDetail]) -> Vec<PageSummary> {
+    pages
+        .iter()
+        .map(|page| PageSummary {
+            slug: page.slug.clone(),
+            title: page.title.clone(),
+            categories: page.categories.clone(),
+            created_at: page.created_at,
+            updated_at: page.updated_at,
+            updated_by: page.updated_by.clone(),
+        })
+        .collect()
+}
+
+fn export_page_file_name(slug: &str) -> String {
+    if slug == "index" {
+        "index-page.html".to_owned()
+    } else {
+        format!("{slug}.html")
+    }
+}
+
+fn safe_export_rel_path(request_path: &str) -> Option<PathBuf> {
+    let trimmed = request_path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Some(PathBuf::from(EXPORT_LATEST_DIR).join("index.html"));
+    }
+
+    let mut rel_path = PathBuf::new();
+    for segment in trimmed.split('/') {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.contains('\\')
+            || segment.contains('\0')
+        {
+            return None;
+        }
+        rel_path.push(segment);
+    }
+
+    (!rel_path.as_os_str().is_empty()).then_some(rel_path)
 }
 
 fn safe_media_folder_rel_path(request_path: &str) -> Option<PathBuf> {
@@ -835,6 +1183,17 @@ fn safe_media_filename(filename: &str) -> Option<String> {
     normalize_slug(stem).map(|stem| format!("{stem}.{extension}"))
 }
 
+fn validate_media_file_size(size: usize) -> StorageResult<()> {
+    if size > MEDIA_FILE_MAX_BYTES {
+        Err(StorageError::MediaFileTooLarge {
+            size,
+            limit: MEDIA_FILE_MAX_BYTES,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 fn media_path_string(path: &Path) -> String {
     path.iter()
         .filter_map(|segment| segment.to_str())
@@ -863,6 +1222,19 @@ fn display_media_path(path: &Path) -> String {
 
 fn media_url(path: &Path) -> String {
     format!("/media/{}", media_path_string(path))
+}
+
+fn export_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        _ => media_content_type(path).unwrap_or("application/octet-stream"),
+    }
 }
 
 fn media_kind_for_path(path: &Path) -> Option<MediaEntryKind> {
@@ -904,6 +1276,150 @@ fn media_content_type(path: &Path) -> Option<&'static str> {
         Some("webm") => Some("video/webm"),
         _ => None,
     }
+}
+
+fn export_page_html(page: &PageDetail, pages: &[PageDetail], body_html: &str) -> String {
+    let mut nav = String::new();
+    for nav_page in pages {
+        let class = if nav_page.slug == page.slug {
+            "flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-stone-300 bg-white px-3 text-left text-sm font-semibold text-slate-950"
+        } else {
+            "flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-transparent bg-transparent px-3 text-left text-sm font-medium text-slate-700 hover:bg-white"
+        };
+        let _ = write!(
+            nav,
+            r#"<a class="{class}" href="{}"><span class="truncate">{}</span></a>"#,
+            escape_html_attr(&export_page_file_name(&nav_page.slug)),
+            escape_html(&nav_page.title)
+        );
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{}</title>
+<link rel="stylesheet" href="assets/tailwind.css">
+</head>
+<body class="bg-stone-50 text-slate-900">
+<div class="min-h-screen bg-stone-50 text-slate-900 md:grid md:grid-cols-[minmax(220px,300px)_minmax(0,1fr)]">
+<aside class="border-b border-stone-200 bg-white/70 px-5 py-5 md:min-h-screen md:border-b-0 md:border-r">
+<div class="mb-5">
+<a class="text-xl font-bold tracking-normal text-slate-950" href="index.html">XP Static Wiki</a>
+<p class="mt-1 text-sm text-slate-500">Static HTML export</p>
+</div>
+<nav class="flex flex-col gap-1">{nav}</nav>
+</aside>
+<main class="min-w-0">
+<header class="flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-stone-200 bg-white px-5 py-3">
+<div class="min-w-0">
+<h1 class="truncate text-lg font-semibold text-slate-950">{}</h1>
+<p class="text-sm text-slate-500">{}</p>
+</div>
+</header>
+<div class="mx-auto w-full max-w-6xl p-4 md:p-6">
+<article class="markdown rounded-lg border border-stone-200 bg-white p-5 shadow-sm md:p-8">{body_html}</article>
+</div>
+</main>
+</div>
+</body>
+</html>
+"#,
+        escape_html(&format!("{} - XP Static Wiki", page.title)),
+        escape_html(&page.title),
+        escape_html(&page.slug),
+    )
+}
+
+fn export_empty_index_html() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XP Static Wiki</title>
+<link rel="stylesheet" href="assets/tailwind.css">
+</head>
+<body class="bg-stone-50 text-slate-900">
+<main class="mx-auto w-full max-w-6xl p-4 md:p-6">
+<article class="markdown rounded-lg border border-stone-200 bg-white p-5 shadow-sm md:p-8">
+<h1>XP Static Wiki</h1>
+<p>No pages were available when this export was generated.</p>
+</article>
+</main>
+</body>
+</html>
+"#
+    .to_owned()
+}
+
+fn rewrite_export_asset_paths(html: &str) -> String {
+    html.replace("src=\"/media/", "src=\"media/")
+        .replace("href=\"/media/", "href=\"media/")
+        .replace("src=\"/assets/", "src=\"assets/")
+        .replace("href=\"/assets/", "href=\"assets/")
+}
+
+fn copy_export_media(root: &Path, export_dir: &Path) -> StorageResult<()> {
+    let export_media_dir = export_dir.join("media");
+    copy_supported_media_files(&root.join(MEDIA_DIR), &export_media_dir, true)?;
+    copy_supported_media_files(Path::new(MEDIA_DIR), &export_media_dir, false)?;
+    copy_supported_media_files(Path::new("assets"), &export_media_dir, false)?;
+    copy_supported_media_files(Path::new("assets"), &export_dir.join("assets"), false)?;
+    Ok(())
+}
+
+fn copy_supported_media_files(
+    source_dir: &Path,
+    destination_dir: &Path,
+    overwrite_existing: bool,
+) -> StorageResult<()> {
+    if !source_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination_dir.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_supported_media_files(&source_path, &destination_path, overwrite_existing)?;
+            continue;
+        }
+        if media_content_type(&source_path).is_none() {
+            continue;
+        }
+        if destination_path.exists() && !overwrite_existing {
+            continue;
+        }
+        if let Some(parent) = destination_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source_path, destination_path)?;
+    }
+
+    Ok(())
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn escape_html_attr(value: &str) -> String {
+    escape_html(value)
 }
 
 fn draft_title(title: &str, draft_slug: &str, template_title: &str) -> String {
@@ -998,6 +1514,28 @@ mod tests {
         }
     }
 
+    fn page_summary(slug: &str, title: &str, created_at: Option<i64>) -> PageSummary {
+        PageSummary {
+            slug: slug.to_owned(),
+            title: title.to_owned(),
+            categories: Vec::new(),
+            created_at,
+            updated_at: created_at,
+            updated_by: None,
+        }
+    }
+
+    fn categorized_page_summary(slug: &str, title: &str, category: &str) -> PageSummary {
+        PageSummary {
+            slug: slug.to_owned(),
+            title: title.to_owned(),
+            categories: vec![category.to_owned()],
+            created_at: None,
+            updated_at: None,
+            updated_by: None,
+        }
+    }
+
     #[test]
     fn save_page_should_create_history_entry() {
         let dir = tempdir().expect("temp dir should be created");
@@ -1009,6 +1547,70 @@ mod tests {
         let history = store.page_history("guide").expect("history should load");
 
         assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn sort_pages_by_creation_time_should_order_oldest_first() {
+        let mut pages = vec![
+            page_summary("later", "Later", Some(20)),
+            page_summary("unknown", "Unknown", None),
+            page_summary("earlier", "Earlier", Some(10)),
+        ];
+
+        sort_pages_by_creation_time(&mut pages);
+
+        let slugs = pages
+            .iter()
+            .map(|page| page.slug.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, vec!["earlier", "later", "unknown"]);
+    }
+
+    #[test]
+    fn page_categories_from_markdown_should_parse_front_matter_categories() {
+        let categories =
+            page_categories_from_markdown("---\ncategories: [Test Page, npc]\n---\n\n# Page");
+
+        assert_eq!(categories, vec!["test-page", "npc"]);
+    }
+
+    #[test]
+    fn expand_category_shortcodes_should_support_bare_category_names() {
+        let pages = vec![categorized_page_summary("alpha", "Alpha Page", "test-page")];
+
+        let expanded = expand_category_shortcodes("Pages:\n\n{{test_page}}", &pages);
+
+        assert_eq!(expanded, "Pages:\n\n- Alpha Page (`alpha`)");
+    }
+
+    #[test]
+    fn read_page_should_expand_category_shortcodes_without_changing_raw_markdown() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+        store
+            .save_page(
+                "alpha",
+                "Alpha Page",
+                "---\ncategories: test-page\n---\n\n# Alpha Page\n\nBody",
+                &test_user(),
+            )
+            .expect("categorized page should save");
+        store
+            .save_page(
+                "index",
+                "Index",
+                "# Index\n\n{{category:test-page}}",
+                &test_user(),
+            )
+            .expect("index page should save");
+
+        let page = store
+            .read_page("index")
+            .expect("page should read")
+            .expect("page should exist");
+
+        assert_eq!(page.markdown, "# Index\n\n{{category:test-page}}");
+        assert_eq!(page.rendered_markdown, "# Index\n\n- Alpha Page (`alpha`)");
     }
 
     #[test]
@@ -1100,6 +1702,72 @@ mod tests {
     }
 
     #[test]
+    fn export_html_site_should_write_pages_assets_and_media() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        store
+            .save_media_file("", "Hero.PNG", b"image", &test_user())
+            .expect("media should be saved");
+        store
+            .save_page(
+                "guide",
+                "Guide",
+                "# Guide\n\n![Hero](/media/hero.png)",
+                &test_user(),
+            )
+            .expect("page should save");
+        let export = store
+            .export_html_site()
+            .expect("HTML export should be written");
+
+        let export_dir = dir.path().join(EXPORT_DIR).join(EXPORT_LATEST_DIR);
+        let html = fs::read_to_string(export_dir.join("guide.html"))
+            .expect("exported page should be readable");
+
+        assert_eq!(export.page_count, 1);
+        assert_eq!(export.url, "/exports/latest/index.html");
+        assert!(export_dir.join("index.html").is_file());
+        assert!(export_dir.join("assets").join("tailwind.css").is_file());
+        assert_eq!(
+            fs::read(export_dir.join("media").join("hero.png"))
+                .expect("exported media should be readable"),
+            b"image"
+        );
+        assert!(html.contains(r#"src="media/hero.png""#));
+    }
+
+    #[test]
+    fn read_export_file_from_root_should_serve_html_files() {
+        let dir = tempdir().expect("temp dir should be created");
+        let export_root = dir.path().join(EXPORT_DIR);
+        fs::create_dir_all(export_root.join(EXPORT_LATEST_DIR))
+            .expect("export dir should be created");
+        fs::write(
+            export_root.join(EXPORT_LATEST_DIR).join("index.html"),
+            "<!doctype html>",
+        )
+        .expect("export file should be written");
+
+        let file = read_export_file_from_root("latest/index.html", &export_root)
+            .expect("export file lookup should not fail")
+            .expect("export file should exist");
+
+        assert_eq!(file.content_type, "text/html; charset=utf-8");
+        assert_eq!(file.contents, b"<!doctype html>");
+    }
+
+    #[test]
+    fn read_export_file_from_root_should_reject_parent_segments() {
+        let dir = tempdir().expect("temp dir should be created");
+
+        let file = read_export_file_from_root("../pages/home.md", dir.path())
+            .expect("export file lookup should not fail");
+
+        assert!(file.is_none());
+    }
+
+    #[test]
     fn safe_media_rel_path_should_reject_parent_segments() {
         let path = safe_media_rel_path("../roles.json");
 
@@ -1125,6 +1793,21 @@ mod tests {
         let filename = safe_media_filename("../portrait.png");
 
         assert!(filename.is_none());
+    }
+
+    #[test]
+    fn validate_media_file_size_should_reject_files_over_limit() {
+        let err = validate_media_file_size(MEDIA_FILE_MAX_BYTES + 1)
+            .expect_err("oversized media file should be rejected");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "media file is too large ({} bytes, maximum {} bytes)",
+                MEDIA_FILE_MAX_BYTES + 1,
+                MEDIA_FILE_MAX_BYTES
+            )
+        );
     }
 
     #[test]
@@ -1244,6 +1927,51 @@ mod tests {
             err.to_string(),
             "media file `portraits/hero.png` already exists"
         );
+    }
+
+    #[test]
+    fn delete_media_entry_should_remove_file_from_worktree_and_git_tree() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        store
+            .save_media_file("", "Hero.PNG", b"image", &test_user())
+            .expect("image should be saved");
+        store
+            .delete_media_entry("hero.png", &test_user())
+            .expect("image should be deleted");
+
+        assert!(!dir.path().join(MEDIA_DIR).join("hero.png").exists());
+        let tree = store
+            .head_commit()
+            .expect("head commit should exist")
+            .tree()
+            .expect("tree should load");
+        assert!(tree.get_path(Path::new("media/hero.png")).is_err());
+    }
+
+    #[test]
+    fn delete_media_entry_should_remove_folder_recursively_from_worktree_and_git_tree() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        store
+            .create_media_folder("", "Portraits", &test_user())
+            .expect("folder should be created");
+        store
+            .save_media_file("portraits", "Hero.PNG", b"image", &test_user())
+            .expect("image should be saved");
+        store
+            .delete_media_entry("portraits", &test_user())
+            .expect("folder should be deleted");
+
+        assert!(!dir.path().join(MEDIA_DIR).join("portraits").exists());
+        let tree = store
+            .head_commit()
+            .expect("head commit should exist")
+            .tree()
+            .expect("tree should load");
+        assert!(tree.get_path(Path::new("media/portraits")).is_err());
     }
 
     #[test]
