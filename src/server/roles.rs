@@ -256,10 +256,39 @@ fn delete_managed_user_with_policy(
 }
 
 fn initialized_system(policy: &RolePolicy) -> RoleResult<RoleSystem<FileStorage>> {
+    recover_empty_role_file(&policy.role_file_path)?;
     let storage = FileStorage::new(&policy.role_file_path)?;
     let mut system = RoleSystem::with_storage(storage, RoleSystemConfig::default());
     ensure_wiki_roles(&mut system)?;
     Ok(system)
+}
+
+fn recover_empty_role_file(path: &Path) -> RoleResult<()> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(role_storage_error(format!(
+                "failed to inspect role file {}: {error}",
+                path.display()
+            )))
+        }
+    };
+
+    if metadata.is_file() && metadata.len() == 0 {
+        fs::remove_file(path).map_err(|error| {
+            role_storage_error(format!(
+                "failed to recover empty role file {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn role_storage_error(message: String) -> RoleAccessError {
+    RoleAccessError::RoleSystem(role_system::Error::Storage(message))
 }
 
 fn ensure_wiki_roles(system: &mut RoleSystem<FileStorage>) -> RoleResult<()> {
@@ -573,6 +602,10 @@ impl UserStore {
         let json = fs::read_to_string(path).map_err(|err| {
             RoleAccessError::UserStore(format!("failed to read {}: {err}", path.display()))
         })?;
+        if json.trim().is_empty() {
+            return Ok(Self::default());
+        }
+
         serde_json::from_str(&json).map_err(|err| {
             RoleAccessError::UserStore(format!("failed to parse {}: {err}", path.display()))
         })
@@ -698,6 +731,40 @@ mod tests {
             .expect("default editor should write");
 
         assert!(policy.role_file_path.exists());
+    }
+
+    #[test]
+    fn initialized_system_should_recover_empty_role_file() {
+        let dir = tempdir().expect("temp dir should be created");
+        let policy = RolePolicy {
+            role_file_path: dir.path().join("roles.json"),
+            user_file_path: dir.path().join("users.json"),
+            default_role: Some(WikiRole::Editor),
+            admin_users: Vec::new(),
+            editor_users: Vec::new(),
+            viewer_users: Vec::new(),
+        };
+        fs::write(&policy.role_file_path, "").expect("empty role file should be written");
+
+        initialized_system(&policy).expect("empty role file should be recovered");
+
+        assert!(
+            fs::metadata(&policy.role_file_path)
+                .expect("role file should be recreated")
+                .len()
+                > 0
+        );
+    }
+
+    #[test]
+    fn user_store_should_treat_empty_file_as_empty_store() {
+        let dir = tempdir().expect("temp dir should be created");
+        let path = dir.path().join("users.json");
+        fs::write(&path, "\n").expect("empty user file should be written");
+
+        let store = UserStore::load(&path).expect("empty user file should be recoverable");
+
+        assert!(store.users.is_empty());
     }
 
     #[test]

@@ -140,7 +140,7 @@ fn callout_markdown(draft: &BuilderDraft) -> String {
     push_field(&mut lines, "title", defaulted(&draft.title, "Note"));
     push_optional_field(&mut lines, "image", &draft.image);
     push_optional_field(&mut lines, "alt", &draft.alt);
-    push_repeated_text_fields(&mut lines, "body", &draft.body, Some("Callout text."));
+    push_repeated_fields(&mut lines, "body", &draft.body, Some("Callout text."));
     if let Some(items) = pipe_list_value(&draft.list_items) {
         push_field(&mut lines, "items", &items);
     }
@@ -165,13 +165,13 @@ fn item_card_markdown(draft: &BuilderDraft) -> String {
     if let Some(tags) = comma_list_value(&draft.tags) {
         push_field(&mut lines, "tags", &tags);
     }
-    push_repeated_text_fields(
+    push_repeated_fields(
         &mut lines,
         "description",
         &draft.body,
         Some("Item description."),
     );
-    push_repeated_line_fields(&mut lines, "line", &draft.rows, Some("Slot: NECK"));
+    push_repeated_fields(&mut lines, "line", &draft.rows, Some("Slot: NECK"));
     component_fence("item-card", &lines)
 }
 
@@ -226,31 +226,7 @@ fn push_optional_field(lines: &mut Vec<String>, key: &str, value: &str) {
     }
 }
 
-fn push_repeated_text_fields(
-    lines: &mut Vec<String>,
-    key: &str,
-    value: &str,
-    fallback: Option<&str>,
-) {
-    let mut added = false;
-    for line in trimmed_lines(value) {
-        push_field(lines, key, line);
-        added = true;
-    }
-
-    if !added {
-        if let Some(fallback) = fallback {
-            push_field(lines, key, fallback);
-        }
-    }
-}
-
-fn push_repeated_line_fields(
-    lines: &mut Vec<String>,
-    key: &str,
-    value: &str,
-    fallback: Option<&str>,
-) {
+fn push_repeated_fields(lines: &mut Vec<String>, key: &str, value: &str, fallback: Option<&str>) {
     let mut added = false;
     for line in trimmed_lines(value) {
         push_field(lines, key, line);

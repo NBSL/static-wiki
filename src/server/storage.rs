@@ -1,11 +1,12 @@
 use crate::markdown::{
-    humanize_slug, render_markdown_with_component_manifests, title_from_markdown,
+    humanize_slug, page_body_from_markdown, render_markdown_with_component_manifests,
+    title_from_markdown,
 };
 use crate::models::{
     DiffLine, DiffLineKind, HtmlExport, MediaEntry, MediaEntryKind, MediaListing, PageDetail,
     PageDiff, PageRevision, PageSummary, PageTemplateDraft, PageTemplateSummary,
 };
-use crate::slug::{is_valid_slug, normalize_slug};
+use crate::slug::{is_valid_slug, normalize_slug, validate_page_title};
 use crate::user::AuthUser;
 use git2::{
     Commit, DiffFormat, DiffOptions, IndexAddOption, Oid, Repository, RepositoryInitOptions,
@@ -53,6 +54,8 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("invalid page slug `{0}`")]
     InvalidSlug(String),
+    #[error("invalid page title: {0}")]
+    InvalidTitle(String),
     #[error("revision `{0}` was not found")]
     RevisionNotFound(String),
     #[error("page template `{0}` was not found")]
@@ -320,15 +323,9 @@ impl WikiStore {
         for entry in fs::read_dir(page_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                continue;
-            }
-            let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            let Some(slug) = valid_slug_from_path(&path, "md") else {
                 continue;
             };
-            if !is_valid_slug(slug) {
-                continue;
-            }
             let markdown = fs::read_to_string(&path)?;
             pages.push(self.page_summary_from_markdown(slug, &markdown)?);
         }
@@ -362,15 +359,9 @@ impl WikiStore {
         for entry in fs::read_dir(template_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                continue;
-            }
-            let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            let Some(slug) = valid_slug_from_path(&path, "md") else {
                 continue;
             };
-            if !is_valid_slug(slug) {
-                continue;
-            }
 
             let markdown = fs::read_to_string(&path)?;
             templates.push(PageTemplateSummary {
@@ -379,7 +370,7 @@ impl WikiStore {
             });
         }
 
-        templates.sort_by(|left, right| left.title.to_lowercase().cmp(&right.title.to_lowercase()));
+        templates.sort_by_key(|template| template.title.to_lowercase());
         Ok(templates)
     }
 
@@ -394,13 +385,7 @@ impl WikiStore {
         for entry in fs::read_dir(component_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let Some(slug) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if is_valid_slug(slug) {
+            if valid_slug_from_path(&path, "json").is_some() {
                 paths.push(path);
             }
         }
@@ -429,11 +414,7 @@ impl WikiStore {
         let manifests = self.list_component_manifests()?;
         let page_summaries = page_summaries_from_details(&pages);
         for page in &pages {
-            let expanded =
-                expand_category_shortcodes(page_render_body(&page.markdown), &page_summaries);
-            let rendered = render_markdown_with_component_manifests(&expanded, &manifests);
-            let rendered = rewrite_export_asset_paths(&rendered);
-            let html = export_page_html(page, &pages, &rendered);
+            let html = render_export_page(page, &pages, &page_summaries, &manifests);
             fs::write(export_dir.join(export_page_file_name(&page.slug)), html)?;
         }
 
@@ -442,13 +423,7 @@ impl WikiStore {
             .find(|page| page.slug == "home")
             .or_else(|| pages.first())
         {
-            Some(page) => {
-                let expanded =
-                    expand_category_shortcodes(page_render_body(&page.markdown), &page_summaries);
-                let rendered = render_markdown_with_component_manifests(&expanded, &manifests);
-                let rendered = rewrite_export_asset_paths(&rendered);
-                export_page_html(page, &pages, &rendered)
-            }
+            Some(page) => render_export_page(page, &pages, &page_summaries, &manifests),
             None => export_empty_index_html(),
         };
         fs::write(export_dir.join("index.html"), index_html)?;
@@ -498,18 +473,27 @@ impl WikiStore {
         let summary = self.page_summary_from_markdown(slug, &markdown)?;
         let category_pages = self.list_pages()?;
         let rendered_markdown =
-            expand_category_shortcodes(page_render_body(&markdown), &category_pages);
+            expand_category_shortcodes(page_body_from_markdown(&markdown), &category_pages);
 
+        let PageSummary {
+            slug,
+            title,
+            categories,
+            promoted,
+            created_at,
+            updated_at,
+            updated_by,
+        } = summary;
         Ok(Some(PageDetail {
-            slug: summary.slug,
-            title: summary.title,
+            slug,
+            title,
             markdown,
             rendered_markdown,
-            categories: summary.categories,
-            promoted: summary.promoted,
-            created_at: summary.created_at,
-            updated_at: summary.updated_at,
-            updated_by: summary.updated_by,
+            categories,
+            promoted,
+            created_at,
+            updated_at,
+            updated_by,
         }))
     }
 
@@ -521,6 +505,8 @@ impl WikiStore {
         user: &AuthUser,
     ) -> StorageResult<PageDetail> {
         validate_slug(slug)?;
+        validate_page_title(title)
+            .map_err(|error| StorageError::InvalidTitle(error.to_string()))?;
         fs::create_dir_all(self.root.join(PAGES_DIR))?;
         fs::write(self.page_path(slug)?, markdown)?;
 
@@ -949,6 +935,15 @@ fn validate_slug(slug: &str) -> StorageResult<()> {
     }
 }
 
+fn valid_slug_from_path<'a>(path: &'a Path, extension: &str) -> Option<&'a str> {
+    if path.extension().and_then(|value| value.to_str()) != Some(extension) {
+        return None;
+    }
+
+    let slug = path.file_stem()?.to_str()?;
+    is_valid_slug(slug).then_some(slug)
+}
+
 fn page_rel_path(slug: &str) -> PathBuf {
     PathBuf::from(PAGES_DIR).join(format!("{slug}.md"))
 }
@@ -962,13 +957,12 @@ fn component_rel_path(slug: &str) -> PathBuf {
 }
 
 fn sort_pages_by_creation_time(pages: &mut [PageSummary]) {
-    pages.sort_by(|left, right| {
-        let left_created_at = left.created_at.unwrap_or(i64::MAX);
-        let right_created_at = right.created_at.unwrap_or(i64::MAX);
-        left_created_at
-            .cmp(&right_created_at)
-            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
-            .then_with(|| left.slug.cmp(&right.slug))
+    pages.sort_by_cached_key(|page| {
+        (
+            page.created_at.unwrap_or(i64::MAX),
+            page.title.to_lowercase(),
+            page.slug.clone(),
+        )
     });
 }
 
@@ -978,36 +972,6 @@ fn page_categories_from_markdown(markdown: &str) -> Vec<String> {
 
 fn page_promoted_from_markdown(markdown: &str) -> bool {
     crate::markdown::promoted_from_page_markdown(markdown)
-}
-
-fn page_render_body(markdown: &str) -> &str {
-    split_page_front_matter(markdown)
-        .map(|(_front_matter, body)| body.trim_start())
-        .unwrap_or(markdown)
-}
-
-fn split_page_front_matter(markdown: &str) -> Option<(&str, &str)> {
-    let mut offset = 0;
-    let mut lines = markdown.split_inclusive('\n');
-    let first = lines.next()?;
-    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
-        return None;
-    }
-    offset += first.len();
-    let front_matter_start = offset;
-
-    for line in lines {
-        let line_start = offset;
-        offset += line.len();
-        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
-            return Some((
-                &markdown[front_matter_start..line_start],
-                &markdown[offset..],
-            ));
-        }
-    }
-
-    None
 }
 
 fn expand_category_shortcodes(markdown: &str, pages: &[PageSummary]) -> String {
@@ -1051,24 +1015,21 @@ fn category_slug_from_shortcode(token: &str) -> Option<String> {
 }
 
 fn category_page_list_markdown(category: &str, pages: &[PageSummary]) -> String {
-    let matches = pages
+    let entries = pages
         .iter()
         .filter(|page| {
             page.categories
                 .iter()
                 .any(|candidate| candidate == category)
         })
+        .map(|page| format!("- [{}](/{})", escape_markdown_text(&page.title), page.slug))
         .collect::<Vec<_>>();
 
-    if matches.is_empty() {
+    if entries.is_empty() {
         return format!("_No pages in category `{category}`._");
     }
 
-    matches
-        .iter()
-        .map(|page| format!("- {} (`{}`)", escape_markdown_text(&page.title), page.slug))
-        .collect::<Vec<_>>()
-        .join("\n")
+    entries.join("\n")
 }
 
 fn escape_markdown_text(value: &str) -> String {
@@ -1100,18 +1061,7 @@ fn escape_markdown_text(value: &str) -> String {
 }
 
 fn page_summaries_from_details(pages: &[PageDetail]) -> Vec<PageSummary> {
-    pages
-        .iter()
-        .map(|page| PageSummary {
-            slug: page.slug.clone(),
-            title: page.title.clone(),
-            categories: page.categories.clone(),
-            promoted: page.promoted,
-            created_at: page.created_at,
-            updated_at: page.updated_at,
-            updated_by: page.updated_by.clone(),
-        })
-        .collect()
+    pages.iter().map(PageSummary::from).collect()
 }
 
 fn export_page_file_name(slug: &str) -> String {
@@ -1128,20 +1078,7 @@ fn safe_export_rel_path(request_path: &str) -> Option<PathBuf> {
         return Some(PathBuf::from(EXPORT_LATEST_DIR).join("index.html"));
     }
 
-    let mut rel_path = PathBuf::new();
-    for segment in trimmed.split('/') {
-        if segment.is_empty()
-            || segment == "."
-            || segment == ".."
-            || segment.contains('\\')
-            || segment.contains('\0')
-        {
-            return None;
-        }
-        rel_path.push(segment);
-    }
-
-    (!rel_path.as_os_str().is_empty()).then_some(rel_path)
+    safe_relative_path(trimmed)
 }
 
 fn safe_media_folder_rel_path(request_path: &str) -> Option<PathBuf> {
@@ -1154,6 +1091,10 @@ fn safe_media_folder_rel_path(request_path: &str) -> Option<PathBuf> {
 }
 
 fn safe_media_rel_path(request_path: &str) -> Option<PathBuf> {
+    safe_relative_path(request_path)
+}
+
+fn safe_relative_path(request_path: &str) -> Option<PathBuf> {
     let mut rel_path = PathBuf::new();
     for segment in request_path.split('/') {
         if segment.is_empty()
@@ -1183,9 +1124,7 @@ fn safe_media_filename(filename: &str) -> Option<String> {
     let path = Path::new(filename);
     let stem = path.file_stem()?.to_str()?;
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if media_content_type(Path::new(&format!("file.{extension}"))).is_none() {
-        return None;
-    }
+    media_content_type(Path::new(&format!("file.{extension}")))?;
 
     normalize_slug(stem).map(|stem| format!("{stem}.{extension}"))
 }
@@ -1283,6 +1222,18 @@ fn media_content_type(path: &Path) -> Option<&'static str> {
         Some("webm") => Some("video/webm"),
         _ => None,
     }
+}
+
+fn render_export_page(
+    page: &PageDetail,
+    pages: &[PageDetail],
+    page_summaries: &[PageSummary],
+    manifests: &[String],
+) -> String {
+    let expanded =
+        expand_category_shortcodes(page_body_from_markdown(&page.markdown), page_summaries);
+    let rendered = render_markdown_with_component_manifests(&expanded, manifests);
+    export_page_html(page, pages, &rewrite_export_asset_paths(&rendered))
 }
 
 fn export_page_html(page: &PageDetail, pages: &[PageDetail], body_html: &str) -> String {
@@ -1563,6 +1514,26 @@ mod tests {
     }
 
     #[test]
+    fn save_page_should_reject_empty_title() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        let result = store.save_page("guide", "  ", "# Guide", &test_user());
+
+        assert!(matches!(result, Err(StorageError::InvalidTitle(_))));
+    }
+
+    #[test]
+    fn save_page_should_reject_invalid_slug() {
+        let dir = tempdir().expect("temp dir should be created");
+        let store = WikiStore::open(dir.path()).expect("store should open");
+
+        let result = store.save_page("../guide", "Guide", "# Guide", &test_user());
+
+        assert!(matches!(result, Err(StorageError::InvalidSlug(_))));
+    }
+
+    #[test]
     fn sort_pages_by_creation_time_should_order_oldest_first() {
         let mut pages = vec![
             page_summary("later", "Later", Some(20)),
@@ -1600,7 +1571,7 @@ mod tests {
 
         let expanded = expand_category_shortcodes("Pages:\n\n{{test_page}}", &pages);
 
-        assert_eq!(expanded, "Pages:\n\n- Alpha Page (`alpha`)");
+        assert_eq!(expanded, "Pages:\n\n- [Alpha Page](/alpha)");
     }
 
     #[test]
@@ -1630,7 +1601,7 @@ mod tests {
             .expect("page should exist");
 
         assert_eq!(page.markdown, "# Index\n\n{{category:test-page}}");
-        assert_eq!(page.rendered_markdown, "# Index\n\n- Alpha Page (`alpha`)");
+        assert_eq!(page.rendered_markdown, "# Index\n\n- [Alpha Page](/alpha)");
     }
 
     #[test]

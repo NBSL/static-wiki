@@ -175,7 +175,7 @@ fn display_path(path: impl AsRef<Path>) -> String {
 #[cfg(feature = "server")]
 fn format_byte_limit(bytes: usize) -> String {
     const MIB: usize = 1024 * 1024;
-    if bytes % MIB == 0 {
+    if bytes.is_multiple_of(MIB) {
         format!("{} MiB", bytes / MIB)
     } else {
         format!("{bytes} bytes")

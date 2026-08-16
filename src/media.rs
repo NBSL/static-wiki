@@ -132,7 +132,7 @@ pub(crate) fn MediaManager(
                                 MediaBreadcrumb {
                                     key: "{crumb.path}",
                                     crumb,
-                                    current_path: current_path.clone(),
+                                    current_path: media_path,
                                     can_manage_media,
                                     dragged_media_path,
                                     on_select: move |path: String| {
@@ -253,13 +253,13 @@ struct MediaCrumb {
 #[component]
 fn MediaBreadcrumb(
     crumb: MediaCrumb,
-    current_path: String,
+    current_path: Signal<String>,
     can_manage_media: bool,
     mut dragged_media_path: Signal<String>,
     on_select: EventHandler<String>,
     on_move_to_folder: EventHandler<MediaMoveRequest>,
 ) -> Element {
-    let is_current = crumb.path == current_path;
+    let is_current = crumb.path == current_path.read().as_str();
     let path = crumb.path.clone();
     let drop_path = crumb.path.clone();
 
@@ -287,7 +287,7 @@ fn MediaBreadcrumb(
                         let source_path = event
                             .data_transfer()
                             .get_as_text()
-                            .unwrap_or_else(|| dragged_media_path());
+                            .unwrap_or_else(&*dragged_media_path);
                         if source_path.trim().is_empty() {
                             return;
                         }
@@ -345,7 +345,7 @@ fn MediaEntryTile(
                             let source_path = event
                                 .data_transfer()
                                 .get_as_text()
-                                .unwrap_or_else(|| dragged_media_path());
+                                .unwrap_or_else(&*dragged_media_path);
                             if source_path.trim().is_empty() {
                                 return;
                             }

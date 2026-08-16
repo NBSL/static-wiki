@@ -2,6 +2,7 @@
 
 A Dioxus fullstack wiki written in Rust. Pages are Markdown files stored in a local Git repository, page edits are committed with the authenticated user as author, and revision diffs are generated with `git2`.
 The page sidebar is sorted by page creation time, oldest first.
+Wiki pages use URL routes based on their slug, such as `/home` or `/getting-started`; `/` redirects to `/home`.
 
 ## Run
 

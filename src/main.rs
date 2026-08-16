@@ -23,7 +23,7 @@ use models::{
     PageTemplateDraft, PageTemplateSummary,
 };
 use settings::{load_settings_overview, SettingsView};
-use slug::normalize_slug;
+use slug::{normalize_page_slug, normalize_slug, validate_page_title};
 use user::{
     delete_managed_user, list_managed_users, save_managed_user, AuthUser, ManagedUser,
     ManagedUserInput, UserAccess, UsersView, NO_ROLE_LABEL,
@@ -41,6 +41,15 @@ enum ActiveTab {
     Media,
     Users,
     Settings,
+}
+
+#[derive(Clone, Debug, PartialEq, Routable)]
+enum Route {
+    #[redirect("/", || Route::Page {
+        slug: "home".to_owned(),
+    })]
+    #[route("/:slug", WikiPage)]
+    Page { slug: String },
 }
 
 fn markdown_component_manifests(state: &Option<ServerFnResult<Vec<String>>>) -> Vec<String> {
@@ -99,26 +108,63 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    let mut selected_slug = use_signal(|| "home".to_owned());
+    rsx! { Router::<Route> {} }
+}
+
+#[component]
+fn WikiPage(slug: String) -> Element {
+    rsx! { WikiApp { route_slug: slug } }
+}
+
+#[component]
+fn WikiApp(route_slug: String) -> Element {
+    let mut selected_slug = use_signal(|| route_slug.clone());
     let mut active_tab = use_signal(|| ActiveTab::View);
     let mut editor_title = use_signal(String::new);
     let mut editor_categories = use_signal(String::new);
     let mut editor_promoted = use_signal(|| true);
     let mut editor_markdown = use_signal(String::new);
     let mut draft_slug = use_signal(|| "home".to_owned());
-    let mut selected_template_slug = use_signal(String::new);
-    let mut editor_is_new_page = use_signal(|| false);
+    let selected_template_slug = use_signal(String::new);
+    let editor_is_new_page = use_signal(|| false);
     let mut selected_revision = use_signal(String::new);
     let mut refresh_key = use_signal(|| 0_u64);
     let mut status = use_signal(String::new);
-    let mut managed_user_id = use_signal(String::new);
-    let mut managed_user_name = use_signal(String::new);
-    let mut managed_user_email = use_signal(String::new);
-    let mut managed_user_role = use_signal(|| "viewer".to_owned());
-    let mut managed_user_locked = use_signal(|| false);
+    let managed_user_id = use_signal(String::new);
+    let managed_user_name = use_signal(String::new);
+    let managed_user_email = use_signal(String::new);
+    let managed_user_role = use_signal(|| "viewer".to_owned());
+    let managed_user_locked = use_signal(|| false);
     let mut export_html_url = use_signal(String::new);
     let media_path = use_signal(String::new);
     let new_media_folder_name = use_signal(String::new);
+    let editor_signals = EditorSignals {
+        draft_slug,
+        editor_title,
+        editor_categories,
+        editor_promoted,
+        editor_markdown,
+        selected_template_slug,
+        editor_is_new_page,
+    };
+    let managed_user_signals = ManagedUserSignals {
+        id: managed_user_id,
+        name: managed_user_name,
+        email: managed_user_email,
+        role: managed_user_role,
+        locked: managed_user_locked,
+    };
+
+    use_effect(use_reactive!(|route_slug| {
+        if selected_slug() != route_slug {
+            selected_slug.set(route_slug.clone());
+            active_tab.set(ActiveTab::View);
+            selected_revision.set(String::new());
+            status.set(String::new());
+        }
+    }));
+
+    let navigator = use_navigator();
 
     let mut user_resource = use_resource(move || async move {
         let _ = refresh_key();
@@ -205,10 +251,11 @@ fn App() -> Element {
         .is_some_and(|access| access.can_manage_settings);
     let current_user_role = user_access
         .as_ref()
-        .and_then(|access| access.role.clone())
-        .unwrap_or_else(|| NO_ROLE_LABEL.to_owned());
-    let can_manage_media = matches!(current_user_role.as_str(), "admin" | "editor");
-    let can_export_html = matches!(current_user_role.as_str(), "admin" | "editor");
+        .and_then(|access| access.role.as_deref())
+        .unwrap_or(NO_ROLE_LABEL);
+    let can_manage_content = matches!(current_user_role, "admin" | "editor");
+    let can_manage_media = can_manage_content;
+    let can_export_html = can_manage_content;
     let user_is_authenticated = user.is_some();
     let current_page = page_state
         .as_ref()
@@ -226,8 +273,7 @@ fn App() -> Element {
             .unwrap_or_else(|| "New page".to_owned()),
     };
     let header_context = match active {
-        ActiveTab::Users => format!("Role: {current_user_role}"),
-        ActiveTab::Settings => format!("Role: {current_user_role}"),
+        ActiveTab::Users | ActiveTab::Settings => format!("Role: {current_user_role}"),
         ActiveTab::Media => {
             let path = media_path();
             if path.is_empty() {
@@ -236,7 +282,7 @@ fn App() -> Element {
                 format!("Media / {path}")
             }
         }
-        _ => selected.clone(),
+        _ => selected,
     };
     let auth_provider_error = auth_providers_state
         .as_ref()
@@ -251,26 +297,12 @@ fn App() -> Element {
     let logout_url = auth_logout_url();
 
     let open_editor = {
-        let current_page = current_page.clone();
         move |_| {
-            if let Some(page) = current_page.clone() {
-                let categories = page.categories.join(", ");
-                let markdown = editable_body_from_page_markdown(&page.markdown);
-                draft_slug.set(page.slug);
-                editor_title.set(page.title);
-                editor_categories.set(categories);
-                editor_promoted.set(page.promoted);
-                editor_markdown.set(markdown);
-                editor_is_new_page.set(false);
+            if let Some(page) = current_page.as_ref() {
+                editor_signals.populate(page);
             } else {
-                draft_slug.set(selected_slug());
-                editor_title.set(String::new());
-                editor_categories.set(String::new());
-                editor_promoted.set(true);
-                editor_markdown.set(String::new());
-                editor_is_new_page.set(true);
+                editor_signals.reset(selected_slug());
             }
-            selected_template_slug.set(String::new());
             active_tab.set(ActiveTab::Edit);
             status.set(String::new());
         }
@@ -304,42 +336,19 @@ fn App() -> Element {
         }
     };
     let new_managed_user = move |_| {
-        managed_user_id.set(String::new());
-        managed_user_name.set(String::new());
-        managed_user_email.set(String::new());
-        managed_user_role.set("viewer".to_owned());
-        managed_user_locked.set(false);
+        managed_user_signals.reset();
         status.set(String::new());
     };
     let edit_managed_user = move |managed_user: ManagedUser| {
-        managed_user_id.set(managed_user.id);
-        managed_user_name.set(managed_user.name);
-        managed_user_email.set(managed_user.email.unwrap_or_default());
-        managed_user_role.set(managed_user.role);
-        managed_user_locked.set(managed_user.locked);
+        managed_user_signals.populate(managed_user);
         status.set(String::new());
     };
     let save_managed_user_action = move |_| async move {
-        let email_value = managed_user_email();
-        let email = if email_value.trim().is_empty() {
-            None
-        } else {
-            Some(email_value.trim().to_owned())
-        };
-        let input = ManagedUserInput {
-            id: managed_user_id().trim().to_owned(),
-            name: managed_user_name().trim().to_owned(),
-            email,
-            role: managed_user_role(),
-        };
+        let input = managed_user_signals.input();
 
         match save_managed_user(input).await {
             Ok(saved) => {
-                managed_user_id.set(saved.id);
-                managed_user_name.set(saved.name);
-                managed_user_email.set(saved.email.unwrap_or_default());
-                managed_user_role.set(saved.role);
-                managed_user_locked.set(saved.locked);
+                managed_user_signals.populate(saved);
                 refresh_key += 1;
                 user_access_resource.restart();
                 users_resource.restart();
@@ -351,11 +360,7 @@ fn App() -> Element {
     let delete_managed_user_action = move |id: String| async move {
         match delete_managed_user(id).await {
             Ok(()) => {
-                managed_user_id.set(String::new());
-                managed_user_name.set(String::new());
-                managed_user_email.set(String::new());
-                managed_user_role.set("viewer".to_owned());
-                managed_user_locked.set(false);
+                managed_user_signals.reset();
                 refresh_key += 1;
                 user_access_resource.restart();
                 users_resource.restart();
@@ -399,14 +404,7 @@ fn App() -> Element {
                     button {
                         class: "inline-flex h-9 items-center rounded-md border border-emerald-700 bg-emerald-700 px-3 text-sm font-semibold text-white hover:bg-emerald-800",
                         onclick: move |_| {
-                            selected_slug.set("new-page".to_owned());
-                            draft_slug.set(String::new());
-                            editor_title.set(String::new());
-                            editor_categories.set(String::new());
-                            editor_promoted.set(true);
-                            editor_markdown.set(String::new());
-                            selected_template_slug.set(String::new());
-                            editor_is_new_page.set(true);
+                            editor_signals.reset(String::new());
                             selected_revision.set(String::new());
                             active_tab.set(ActiveTab::Edit);
                             status.set(String::new());
@@ -450,13 +448,12 @@ fn App() -> Element {
                                     for page in promoted_pages {
                                         PageNavButton {
                                             page,
-                                            selected: selected.clone(),
-                                            on_select: move |slug: String| {
-                                                selected_slug.set(slug);
+                                            selected: selected_slug,
+                                            on_open: move |_| {
                                                 active_tab.set(ActiveTab::View);
                                                 selected_revision.set(String::new());
                                                 status.set(String::new());
-                                            }
+                                            },
                                         }
                                     }
                                 }
@@ -571,31 +568,32 @@ fn App() -> Element {
                                 on_apply_template: apply_template_action,
                                 on_cancel: move |_| active_tab.set(ActiveTab::View),
                                 on_save: move |_| async move {
-                                    let Some(slug) = normalize_slug(&draft_slug()) else {
-                                        status.set("Choose a valid slug or title.".to_owned());
-                                        return;
-                                    };
-                                    let title = editor_title();
-                                    let categories = editor_categories();
-                                    let promoted = editor_promoted();
-                                    let markdown = compose_page_markdown_with_metadata(
-                                        &title,
-                                        &categories,
-                                        promoted,
+                                    let page_input = match prepare_page_save(
+                                        &editor_title(),
+                                        &draft_slug(),
+                                        &editor_categories(),
+                                        editor_promoted(),
                                         &editor_markdown(),
-                                    );
-                                    match save_wiki_page(slug.clone(), title, markdown).await {
+                                    ) {
+                                        Ok(input) => input,
+                                        Err(error) => {
+                                            status.set(error.to_string());
+                                            return;
+                                        }
+                                    };
+
+                                    match save_wiki_page(
+                                        page_input.slug,
+                                        page_input.title,
+                                        page_input.markdown,
+                                    )
+                                    .await
+                                    {
                                         Ok(saved) => {
-                                            let categories = saved.categories.join(", ");
-                                            let markdown =
-                                                editable_body_from_page_markdown(&saved.markdown);
-                                            selected_slug.set(saved.slug.clone());
-                                            draft_slug.set(saved.slug);
-                                            editor_title.set(saved.title);
-                                            editor_categories.set(categories);
-                                            editor_promoted.set(saved.promoted);
-                                            editor_markdown.set(markdown);
-                                            editor_is_new_page.set(false);
+                                            let saved_slug = saved.slug.clone();
+                                            selected_slug.set(saved_slug.clone());
+                                            editor_signals.populate(&saved);
+                                            let _ = navigator.push(Route::Page { slug: saved_slug });
                                             selected_revision.set(String::new());
                                             active_tab.set(ActiveTab::View);
                                             refresh_key += 1;
@@ -607,7 +605,7 @@ fn App() -> Element {
                                         }
                                         Err(err) => status.set(format!("Save failed: {err}")),
                                     }
-                                }
+                                },
                             }
                         },
                         ActiveTab::History => rsx! {
@@ -652,6 +650,114 @@ fn App() -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PageSaveInput {
+    slug: String,
+    title: String,
+    markdown: String,
+}
+
+fn prepare_page_save(
+    title: &str,
+    draft_slug: &str,
+    categories: &str,
+    promoted: bool,
+    body: &str,
+) -> Result<PageSaveInput, slug::PageValidationError> {
+    validate_page_title(title)?;
+    let slug_source = if draft_slug.trim().is_empty() {
+        title
+    } else {
+        draft_slug
+    };
+    let slug = normalize_page_slug(slug_source)?;
+    let markdown = compose_page_markdown_with_metadata(title, categories, promoted, body);
+
+    Ok(PageSaveInput {
+        slug,
+        title: title.to_owned(),
+        markdown,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct EditorSignals {
+    draft_slug: Signal<String>,
+    editor_title: Signal<String>,
+    editor_categories: Signal<String>,
+    editor_promoted: Signal<bool>,
+    editor_markdown: Signal<String>,
+    selected_template_slug: Signal<String>,
+    editor_is_new_page: Signal<bool>,
+}
+
+impl EditorSignals {
+    fn reset(self, draft: String) {
+        let mut signals = self;
+        signals.draft_slug.set(draft);
+        signals.editor_title.set(String::new());
+        signals.editor_categories.set(String::new());
+        signals.editor_promoted.set(true);
+        signals.editor_markdown.set(String::new());
+        signals.selected_template_slug.set(String::new());
+        signals.editor_is_new_page.set(true);
+    }
+
+    fn populate(self, page: &PageDetail) {
+        let mut signals = self;
+        signals.draft_slug.set(page.slug.clone());
+        signals.editor_title.set(page.title.clone());
+        signals.editor_categories.set(page.categories.join(", "));
+        signals.editor_promoted.set(page.promoted);
+        signals
+            .editor_markdown
+            .set(editable_body_from_page_markdown(&page.markdown));
+        signals.editor_is_new_page.set(false);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ManagedUserSignals {
+    id: Signal<String>,
+    name: Signal<String>,
+    email: Signal<String>,
+    role: Signal<String>,
+    locked: Signal<bool>,
+}
+
+impl ManagedUserSignals {
+    fn reset(self) {
+        let mut signals = self;
+        signals.id.set(String::new());
+        signals.name.set(String::new());
+        signals.email.set(String::new());
+        signals.role.set("viewer".to_owned());
+        signals.locked.set(false);
+    }
+
+    fn populate(self, user: ManagedUser) {
+        let mut signals = self;
+        signals.id.set(user.id);
+        signals.name.set(user.name);
+        signals.email.set(user.email.unwrap_or_default());
+        signals.role.set(user.role);
+        signals.locked.set(user.locked);
+    }
+
+    fn input(self) -> ManagedUserInput {
+        let id = (self.id)();
+        let name = (self.name)();
+        let email = (self.email)();
+
+        ManagedUserInput {
+            id: id.trim().to_owned(),
+            name: name.trim().to_owned(),
+            email: (!email.trim().is_empty()).then_some(email.trim().to_owned()),
+            role: (self.role)(),
         }
     }
 }
@@ -722,20 +828,25 @@ fn TabButton(label: &'static str, active: bool, onclick: EventHandler<MouseEvent
 }
 
 #[component]
-fn PageNavButton(page: PageSummary, selected: String, on_select: EventHandler<String>) -> Element {
-    let class = if page.slug == selected {
+fn PageNavButton(
+    page: PageSummary,
+    selected: Signal<String>,
+    on_open: EventHandler<()>,
+) -> Element {
+    let PageSummary { slug, title, .. } = page;
+    let class = if slug == selected() {
         "flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-stone-300 bg-white px-3 text-left text-sm font-semibold text-slate-950"
     } else {
         "flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-transparent bg-transparent px-3 text-left text-sm font-medium text-slate-700 hover:bg-white"
     };
-    let slug = page.slug.clone();
 
     rsx! {
-        button {
-            key: "{page.slug}",
+        Link {
+            key: "{slug}",
+            to: Route::Page { slug },
             class,
-            onclick: move |_| on_select.call(slug.clone()),
-            span { class: "truncate", "{page.title}" }
+            onclick: move |_| on_open.call(()),
+            span { class: "truncate", "{title}" }
         }
     }
 }
@@ -952,8 +1063,7 @@ fn HistoryView(
                             for revision in revisions {
                                 RevisionButton {
                                     revision,
-                                    active_revision: selected_revision(),
-                                    on_select: move |id: String| selected_revision.set(id),
+                                    active_revision: selected_revision,
                                 }
                             }
                         },
@@ -989,23 +1099,18 @@ fn HistoryView(
 }
 
 #[component]
-fn RevisionButton(
-    revision: PageRevision,
-    active_revision: String,
-    on_select: EventHandler<String>,
-) -> Element {
-    let class = if revision.id == active_revision {
+fn RevisionButton(revision: PageRevision, active_revision: Signal<String>) -> Element {
+    let class = if revision.id == active_revision() {
         "w-full rounded-md border border-emerald-700 bg-emerald-50 p-3 text-left text-sm"
     } else {
         "w-full rounded-md border border-stone-200 bg-white p-3 text-left text-sm hover:border-stone-300"
     };
-    let id = revision.id.clone();
 
     rsx! {
         button {
             key: "{revision.id}",
             class,
-            onclick: move |_| on_select.call(id.clone()),
+            onclick: move |_| active_revision.set(revision.id.clone()),
             span { class: "block font-mono font-semibold text-slate-950", "{revision.short_id}" }
             span { class: "block truncate text-slate-700", "{revision.summary}" }
             span { class: "block text-xs text-slate-500", "{revision.author} · {revision.timestamp}" }
@@ -1187,11 +1292,8 @@ async fn save_wiki_page(
         }
     })?;
 
-    let normalized = normalize_slug(&slug).ok_or_else(|| ServerFnError::ServerError {
-        message: "invalid page slug".to_owned(),
-        code: 400,
-        details: None,
-    })?;
+    validate_page_title(&title).map_err(client_validation_error)?;
+    let normalized = normalize_page_slug(&slug).map_err(client_validation_error)?;
     server::roles::ensure_can_write_page(&user, &normalized).map_err(role_server_error)?;
 
     server::storage::save_page(&normalized, &title, &markdown, &user).map_err(server_error)
@@ -1209,9 +1311,19 @@ async fn get_wiki_diff(slug: String, revision: String) -> ServerFnResult<PageDif
 
 #[cfg(feature = "server")]
 fn server_error(err: impl ToString) -> ServerFnError {
+    server_error_with_code(err, 500)
+}
+
+#[cfg(feature = "server")]
+fn client_validation_error(err: impl ToString) -> ServerFnError {
+    server_error_with_code(err, 400)
+}
+
+#[cfg(feature = "server")]
+fn server_error_with_code(err: impl ToString, code: u16) -> ServerFnError {
     ServerFnError::ServerError {
         message: err.to_string(),
-        code: 500,
+        code,
         details: None,
     }
 }
@@ -1248,11 +1360,11 @@ fn auth_login_links(providers: &[AuthProviderInfo]) -> Vec<LoginLink> {
 fn app_server_url(path: &str) -> String {
     #[cfg(feature = "desktop")]
     {
-        return format!(
+        format!(
             "{}/{}",
             desktop_server_url().trim_end_matches('/'),
             path.trim_start_matches('/')
-        );
+        )
     }
 
     #[cfg(not(feature = "desktop"))]
@@ -1264,10 +1376,10 @@ fn app_server_url(path: &str) -> String {
 fn auth_login_url(provider: &str) -> String {
     #[cfg(feature = "desktop")]
     {
-        return format!(
+        format!(
             "{}/auth/login/{provider}",
             desktop_server_url().trim_end_matches('/')
-        );
+        )
     }
 
     #[cfg(not(feature = "desktop"))]
@@ -1279,7 +1391,7 @@ fn auth_login_url(provider: &str) -> String {
 fn auth_logout_url() -> String {
     #[cfg(feature = "desktop")]
     {
-        return format!("{}/auth/logout", desktop_server_url().trim_end_matches('/'));
+        format!("{}/auth/logout", desktop_server_url().trim_end_matches('/'))
     }
 
     #[cfg(not(feature = "desktop"))]
@@ -1291,4 +1403,51 @@ fn auth_logout_url() -> String {
 #[cfg(feature = "desktop")]
 fn desktop_server_url() -> String {
     std::env::var("XP_WIKI_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn page_route_should_parse_slug_from_root_segment() {
+        let route = Route::from_str("/guide").expect("page route should parse");
+
+        assert_eq!(
+            route,
+            Route::Page {
+                slug: "guide".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn root_route_should_redirect_to_home_page() {
+        let route = Route::from_str("/").expect("root route should parse");
+
+        assert_eq!(
+            route,
+            Route::Page {
+                slug: "home".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_page_save_should_normalize_title_when_slug_is_empty() {
+        let input = prepare_page_save("Getting Started", "  ", "guide", true, "# Body")
+            .expect("page input should be prepared");
+
+        assert_eq!(input.slug, "getting-started");
+        assert_eq!(input.title, "Getting Started");
+        assert!(input.markdown.contains("categories: [guide]"));
+    }
+
+    #[test]
+    fn prepare_page_save_should_reject_invalid_title() {
+        let result = prepare_page_save("  ", "guide", "", true, "# Body");
+
+        assert_eq!(result, Err(slug::PageValidationError::EmptyTitle));
+    }
 }

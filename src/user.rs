@@ -167,10 +167,7 @@ fn UserRow(
     };
     let select_user = managed_user.clone();
     let delete_id = managed_user.id.clone();
-    let email = managed_user
-        .email
-        .clone()
-        .unwrap_or_else(|| "No email".to_owned());
+    let email = managed_user.email.as_deref().unwrap_or("No email");
 
     rsx! {
         div { class,

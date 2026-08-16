@@ -30,6 +30,20 @@ pub struct PageDetail {
     pub updated_by: Option<String>,
 }
 
+impl From<&PageDetail> for PageSummary {
+    fn from(page: &PageDetail) -> Self {
+        Self {
+            slug: page.slug.clone(),
+            title: page.title.clone(),
+            categories: page.categories.clone(),
+            promoted: page.promoted,
+            created_at: page.created_at,
+            updated_at: page.updated_at,
+            updated_by: page.updated_by.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PageTemplateSummary {
     pub slug: String,

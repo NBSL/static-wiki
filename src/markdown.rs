@@ -42,21 +42,21 @@ pub fn compose_page_markdown(title: &str, body: &str) -> String {
     let title = title.trim();
     let body = body.trim();
 
-    if let Some((front_matter, content)) = split_leading_front_matter_block(body) {
-        let content = content.trim();
-        let front_matter = front_matter.trim_end();
-        if title.is_empty() || content.starts_with("# ") {
-            if content.is_empty() {
-                format!("{front_matter}\n")
-            } else {
-                format!("{front_matter}\n\n{content}\n")
-            }
-        } else if content.is_empty() {
-            format!("{front_matter}\n\n# {title}\n")
-        } else {
-            format!("{front_matter}\n\n# {title}\n\n{content}\n")
-        }
-    } else if title.is_empty() || body.starts_with("# ") {
+    let Some((front_matter, content)) = split_leading_front_matter_block(body) else {
+        return compose_page_body(title, body);
+    };
+
+    let front_matter = front_matter.trim_end();
+    let content = compose_page_body(title, content.trim());
+    if content.is_empty() {
+        format!("{front_matter}\n")
+    } else {
+        format!("{front_matter}\n\n{}\n", content.trim_end())
+    }
+}
+
+fn compose_page_body(title: &str, body: &str) -> String {
+    if title.is_empty() || body.starts_with("# ") {
         body.to_owned()
     } else if body.is_empty() {
         format!("# {title}\n")
@@ -81,6 +81,13 @@ pub fn editable_body_from_page_markdown(markdown: &str) -> String {
     };
 
     front_matter_and_body_to_markdown(&front_matter_without_editor_metadata(front_matter), body)
+}
+
+#[cfg(any(feature = "server", test))]
+pub fn page_body_from_markdown(markdown: &str) -> &str {
+    split_leading_front_matter(markdown)
+        .map(|(_front_matter, body)| body.trim_start())
+        .unwrap_or(markdown)
 }
 
 pub fn categories_text_from_page_markdown(markdown: &str) -> String {
@@ -236,21 +243,18 @@ fn category_slugs_from_front_matter(front_matter: &str) -> Vec<String> {
 }
 
 fn promoted_from_front_matter(front_matter: &str) -> bool {
-    for line in front_matter.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
+    front_matter
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
 
-        let Some((key, value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        if key.trim() == "promoted" {
-            return bool_from_front_matter_value(value).unwrap_or(true);
-        }
-    }
-
-    true
+            let (key, value) = trimmed.split_once(':')?;
+            (key.trim() == "promoted").then(|| bool_from_front_matter_value(value).unwrap_or(true))
+        })
+        .unwrap_or(true)
 }
 
 fn bool_from_front_matter_value(value: &str) -> Option<bool> {
@@ -307,22 +311,9 @@ fn split_leading_front_matter(markdown: &str) -> Option<(&str, &str)> {
 }
 
 fn split_leading_front_matter_block(markdown: &str) -> Option<(&str, &str)> {
-    let mut offset = 0;
-    let mut lines = markdown.split_inclusive('\n');
-    let first = lines.next()?;
-    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
-        return None;
-    }
-    offset += first.len();
-
-    for line in lines {
-        offset += line.len();
-        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
-            return Some((&markdown[..offset], &markdown[offset..]));
-        }
-    }
-
-    None
+    let (_front_matter, body) = split_leading_front_matter(markdown)?;
+    let body_start = markdown.len() - body.len();
+    Some((&markdown[..body_start], body))
 }
 
 #[cfg(any(feature = "server", test))]
