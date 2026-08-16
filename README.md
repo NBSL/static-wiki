@@ -30,10 +30,13 @@ Pages can declare categories in a leading front matter block. Category names are
 ```markdown
 ---
 categories: [test-page, npc]
+promoted: false
 ---
 
 # Example Page
 ```
+
+Pages are promoted into the sidebar by default. Set `promoted: false`, or clear the Promoted checkbox in the editor, to hide a page from the sidebar.
 
 Use `{{category:test-page}}` in page Markdown to render a list of pages in that category. Bare category shortcodes such as `{{test_page}}` are also supported; `{{title}}` and `{{slug}}` remain reserved for templates.
 

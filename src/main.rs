@@ -13,8 +13,9 @@ mod server;
 use builder::{EditorMode, ModeButton, PageBuilder};
 use dioxus::prelude::*;
 use markdown::{
-    categories_text_from_page_markdown, compose_page_markdown_with_categories,
-    editable_body_from_page_markdown, render_markdown_with_component_manifests,
+    categories_text_from_page_markdown, compose_page_markdown_with_metadata,
+    editable_body_from_page_markdown, promoted_from_page_markdown,
+    render_markdown_with_component_manifests,
 };
 use media::{list_media_entries, MediaManager};
 use models::{
@@ -102,6 +103,7 @@ fn App() -> Element {
     let mut active_tab = use_signal(|| ActiveTab::View);
     let mut editor_title = use_signal(String::new);
     let mut editor_categories = use_signal(String::new);
+    let mut editor_promoted = use_signal(|| true);
     let mut editor_markdown = use_signal(String::new);
     let mut draft_slug = use_signal(|| "home".to_owned());
     let mut selected_template_slug = use_signal(String::new);
@@ -257,12 +259,14 @@ fn App() -> Element {
                 draft_slug.set(page.slug);
                 editor_title.set(page.title);
                 editor_categories.set(categories);
+                editor_promoted.set(page.promoted);
                 editor_markdown.set(markdown);
                 editor_is_new_page.set(false);
             } else {
                 draft_slug.set(selected_slug());
                 editor_title.set(String::new());
                 editor_categories.set(String::new());
+                editor_promoted.set(true);
                 editor_markdown.set(String::new());
                 editor_is_new_page.set(true);
             }
@@ -285,12 +289,14 @@ fn App() -> Element {
         match apply_page_template(template_slug, normalized_slug.clone(), editor_title()).await {
             Ok(draft) => {
                 let categories = categories_text_from_page_markdown(&draft.markdown);
+                let promoted = promoted_from_page_markdown(&draft.markdown);
                 let markdown = editable_body_from_page_markdown(&draft.markdown);
                 draft_slug.set(normalized_slug);
                 editor_title.set(draft.title);
                 if !categories.is_empty() {
                     editor_categories.set(categories);
                 }
+                editor_promoted.set(promoted);
                 editor_markdown.set(markdown);
                 status.set("Template applied.".to_owned());
             }
@@ -397,6 +403,7 @@ fn App() -> Element {
                             draft_slug.set(String::new());
                             editor_title.set(String::new());
                             editor_categories.set(String::new());
+                            editor_promoted.set(true);
                             editor_markdown.set(String::new());
                             selected_template_slug.set(String::new());
                             editor_is_new_page.set(true);
@@ -431,16 +438,26 @@ fn App() -> Element {
                         Some(Ok(pages)) if pages.is_empty() => rsx! {
                             p { class: "py-6 text-sm text-slate-500", "No pages" }
                         },
-                        Some(Ok(pages)) => rsx! {
-                            for page in pages {
-                                PageNavButton {
-                                    page,
-                                    selected: selected.clone(),
-                                    on_select: move |slug: String| {
-                                        selected_slug.set(slug);
-                                        active_tab.set(ActiveTab::View);
-                                        selected_revision.set(String::new());
-                                        status.set(String::new());
+                        Some(Ok(pages)) => {
+                            let promoted_pages = pages
+                                .into_iter()
+                                .filter(|page| page.promoted)
+                                .collect::<Vec<_>>();
+                            rsx! {
+                                if promoted_pages.is_empty() {
+                                    p { class: "py-6 text-sm text-slate-500", "No promoted pages" }
+                                } else {
+                                    for page in promoted_pages {
+                                        PageNavButton {
+                                            page,
+                                            selected: selected.clone(),
+                                            on_select: move |slug: String| {
+                                                selected_slug.set(slug);
+                                                active_tab.set(ActiveTab::View);
+                                                selected_revision.set(String::new());
+                                                status.set(String::new());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -549,6 +566,7 @@ fn App() -> Element {
                                 component_manifests: markdown_component_manifests(&markdown_components_state),
                                 editor_title,
                                 editor_categories,
+                                editor_promoted,
                                 editor_markdown,
                                 on_apply_template: apply_template_action,
                                 on_cancel: move |_| active_tab.set(ActiveTab::View),
@@ -559,9 +577,11 @@ fn App() -> Element {
                                     };
                                     let title = editor_title();
                                     let categories = editor_categories();
-                                    let markdown = compose_page_markdown_with_categories(
+                                    let promoted = editor_promoted();
+                                    let markdown = compose_page_markdown_with_metadata(
                                         &title,
                                         &categories,
+                                        promoted,
                                         &editor_markdown(),
                                     );
                                     match save_wiki_page(slug.clone(), title, markdown).await {
@@ -573,6 +593,7 @@ fn App() -> Element {
                                             draft_slug.set(saved.slug);
                                             editor_title.set(saved.title);
                                             editor_categories.set(categories);
+                                            editor_promoted.set(saved.promoted);
                                             editor_markdown.set(markdown);
                                             editor_is_new_page.set(false);
                                             selected_revision.set(String::new());
@@ -758,6 +779,7 @@ fn PageEditor(
     component_manifests: Vec<String>,
     editor_title: Signal<String>,
     editor_categories: Signal<String>,
+    editor_promoted: Signal<bool>,
     editor_markdown: Signal<String>,
     on_apply_template: EventHandler<MouseEvent>,
     on_cancel: EventHandler<MouseEvent>,
@@ -765,9 +787,10 @@ fn PageEditor(
 ) -> Element {
     let mut editor_mode = use_signal(|| EditorMode::Builder);
     let preview_html = render_markdown_with_component_manifests(
-        &compose_page_markdown_with_categories(
+        &compose_page_markdown_with_metadata(
             &editor_title(),
             &editor_categories(),
+            editor_promoted(),
             &editor_markdown(),
         ),
         &component_manifests,
@@ -844,6 +867,15 @@ fn PageEditor(
                             oninput: move |event| editor_categories.set(event.value()),
                             placeholder: "test-page, npc"
                         }
+                    }
+                    label { class: "flex items-center gap-2 text-sm font-semibold text-slate-700",
+                        input {
+                            class: "h-4 w-4 rounded border-stone-300 text-emerald-700",
+                            r#type: "checkbox",
+                            checked: editor_promoted(),
+                            oninput: move |event| editor_promoted.set(event.checked())
+                        }
+                        span { "Promoted" }
                     }
                     div { class: "flex flex-wrap items-center gap-2",
                         ModeButton {

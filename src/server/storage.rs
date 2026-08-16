@@ -345,6 +345,7 @@ impl WikiStore {
             slug: slug.to_owned(),
             title: title_from_markdown(markdown, slug),
             categories: page_categories_from_markdown(markdown),
+            promoted: page_promoted_from_markdown(markdown),
             created_at: history.last().map(|revision| revision.timestamp),
             updated_at: latest.map(|revision| revision.timestamp),
             updated_by: latest.map(|revision| revision.author.clone()),
@@ -505,6 +506,7 @@ impl WikiStore {
             markdown,
             rendered_markdown,
             categories: summary.categories,
+            promoted: summary.promoted,
             created_at: summary.created_at,
             updated_at: summary.updated_at,
             updated_by: summary.updated_by,
@@ -974,6 +976,10 @@ fn page_categories_from_markdown(markdown: &str) -> Vec<String> {
     crate::markdown::category_slugs_from_markdown(markdown)
 }
 
+fn page_promoted_from_markdown(markdown: &str) -> bool {
+    crate::markdown::promoted_from_page_markdown(markdown)
+}
+
 fn page_render_body(markdown: &str) -> &str {
     split_page_front_matter(markdown)
         .map(|(_front_matter, body)| body.trim_start())
@@ -1100,6 +1106,7 @@ fn page_summaries_from_details(pages: &[PageDetail]) -> Vec<PageSummary> {
             slug: page.slug.clone(),
             title: page.title.clone(),
             categories: page.categories.clone(),
+            promoted: page.promoted,
             created_at: page.created_at,
             updated_at: page.updated_at,
             updated_by: page.updated_by.clone(),
@@ -1281,6 +1288,10 @@ fn media_content_type(path: &Path) -> Option<&'static str> {
 fn export_page_html(page: &PageDetail, pages: &[PageDetail], body_html: &str) -> String {
     let mut nav = String::new();
     for nav_page in pages {
+        if !nav_page.promoted {
+            continue;
+        }
+
         let class = if nav_page.slug == page.slug {
             "flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-stone-300 bg-white px-3 text-left text-sm font-semibold text-slate-950"
         } else {
@@ -1519,6 +1530,7 @@ mod tests {
             slug: slug.to_owned(),
             title: title.to_owned(),
             categories: Vec::new(),
+            promoted: true,
             created_at,
             updated_at: created_at,
             updated_by: None,
@@ -1530,6 +1542,7 @@ mod tests {
             slug: slug.to_owned(),
             title: title.to_owned(),
             categories: vec![category.to_owned()],
+            promoted: true,
             created_at: None,
             updated_at: None,
             updated_by: None,
@@ -1572,6 +1585,13 @@ mod tests {
             page_categories_from_markdown("---\ncategories: [Test Page, npc]\n---\n\n# Page");
 
         assert_eq!(categories, vec!["test-page", "npc"]);
+    }
+
+    #[test]
+    fn page_promoted_from_markdown_should_parse_false_front_matter() {
+        let promoted = page_promoted_from_markdown("---\npromoted: false\n---\n\n# Page");
+
+        assert!(!promoted);
     }
 
     #[test]

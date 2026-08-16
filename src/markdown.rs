@@ -65,8 +65,13 @@ pub fn compose_page_markdown(title: &str, body: &str) -> String {
     }
 }
 
-pub fn compose_page_markdown_with_categories(title: &str, categories: &str, body: &str) -> String {
-    let body = body_with_categories(categories, body);
+pub fn compose_page_markdown_with_metadata(
+    title: &str,
+    categories: &str,
+    promoted: bool,
+    body: &str,
+) -> String {
+    let body = body_with_metadata(categories, promoted, body);
     compose_page_markdown(title, &body)
 }
 
@@ -75,7 +80,7 @@ pub fn editable_body_from_page_markdown(markdown: &str) -> String {
         return markdown.to_owned();
     };
 
-    front_matter_and_body_to_markdown(&front_matter_without_categories(front_matter), body)
+    front_matter_and_body_to_markdown(&front_matter_without_editor_metadata(front_matter), body)
 }
 
 pub fn categories_text_from_page_markdown(markdown: &str) -> String {
@@ -90,26 +95,42 @@ pub fn category_slugs_from_markdown(markdown: &str) -> Vec<String> {
     category_slugs_from_front_matter(front_matter)
 }
 
-fn body_with_categories(categories: &str, body: &str) -> String {
+pub fn promoted_from_page_markdown(markdown: &str) -> bool {
+    let Some((front_matter, _body)) = split_leading_front_matter(markdown) else {
+        return true;
+    };
+
+    promoted_from_front_matter(front_matter)
+}
+
+fn body_with_metadata(categories: &str, promoted: bool, body: &str) -> String {
     let category_slugs = category_slugs_from_text(categories);
     let Some((front_matter, body)) = split_leading_front_matter(body) else {
-        if category_slugs.is_empty() {
+        if category_slugs.is_empty() && promoted {
             return body.to_owned();
         }
 
         return front_matter_and_body_to_markdown(
-            &[category_front_matter_line(&category_slugs)],
+            &metadata_front_matter_lines(&category_slugs, promoted),
             body,
         );
     };
 
-    let mut front_matter_lines = Vec::new();
-    if !category_slugs.is_empty() {
-        front_matter_lines.push(category_front_matter_line(&category_slugs));
-    }
-    front_matter_lines.extend(front_matter_without_categories(front_matter));
+    let mut front_matter_lines = metadata_front_matter_lines(&category_slugs, promoted);
+    front_matter_lines.extend(front_matter_without_editor_metadata(front_matter));
 
     front_matter_and_body_to_markdown(&front_matter_lines, body)
+}
+
+fn metadata_front_matter_lines(category_slugs: &[String], promoted: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !category_slugs.is_empty() {
+        lines.push(category_front_matter_line(category_slugs));
+    }
+    if !promoted {
+        lines.push("promoted: false".to_owned());
+    }
+    lines
 }
 
 fn category_front_matter_line(category_slugs: &[String]) -> String {
@@ -146,7 +167,7 @@ fn trimmed_front_matter_lines(lines: &[String]) -> Vec<String> {
     lines[start..end].to_vec()
 }
 
-fn front_matter_without_categories(front_matter: &str) -> Vec<String> {
+fn front_matter_without_editor_metadata(front_matter: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut reading_category_list = false;
 
@@ -166,6 +187,9 @@ fn front_matter_without_categories(front_matter: &str) -> Vec<String> {
 
         if matches!(key.trim(), "category" | "categories") {
             reading_category_list = value.trim().is_empty();
+            continue;
+        }
+        if key.trim() == "promoted" {
             continue;
         }
 
@@ -209,6 +233,33 @@ fn category_slugs_from_front_matter(front_matter: &str) -> Vec<String> {
     }
 
     categories
+}
+
+fn promoted_from_front_matter(front_matter: &str) -> bool {
+    for line in front_matter.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if key.trim() == "promoted" {
+            return bool_from_front_matter_value(value).unwrap_or(true);
+        }
+    }
+
+    true
+}
+
+fn bool_from_front_matter_value(value: &str) -> Option<bool> {
+    let value = value.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+    match value.as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn category_slugs_from_text(value: &str) -> Vec<String> {
@@ -331,8 +382,8 @@ mod tests {
     }
 
     #[test]
-    fn compose_page_markdown_with_categories_should_write_front_matter() {
-        let markdown = compose_page_markdown_with_categories("Page", "Test Page, npc", "Body");
+    fn compose_page_markdown_with_metadata_should_write_categories_front_matter() {
+        let markdown = compose_page_markdown_with_metadata("Page", "Test Page, npc", true, "Body");
 
         assert_eq!(
             markdown,
@@ -341,16 +392,42 @@ mod tests {
     }
 
     #[test]
-    fn compose_page_markdown_with_categories_should_replace_existing_categories() {
-        let markdown = compose_page_markdown_with_categories(
+    fn compose_page_markdown_with_metadata_should_replace_existing_categories() {
+        let markdown = compose_page_markdown_with_metadata(
             "Page",
             "items",
+            true,
             "---\ncategories:\n  - Old Page\nstatus: draft\n---\n\n# Page\n\nBody",
         );
 
         assert_eq!(
             markdown,
             "---\ncategories: [items]\nstatus: draft\n---\n\n# Page\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn compose_page_markdown_with_metadata_should_write_hidden_sidebar_state() {
+        let markdown = compose_page_markdown_with_metadata("Page", "Test Page", false, "Body");
+
+        assert_eq!(
+            markdown,
+            "---\ncategories: [test-page]\npromoted: false\n---\n\n# Page\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn compose_page_markdown_with_metadata_should_replace_existing_promoted_value() {
+        let markdown = compose_page_markdown_with_metadata(
+            "Page",
+            "",
+            false,
+            "---\npromoted: true\nstatus: draft\n---\n\n# Page\n\nBody",
+        );
+
+        assert_eq!(
+            markdown,
+            "---\npromoted: false\nstatus: draft\n---\n\n# Page\n\nBody\n"
         );
     }
 
@@ -371,10 +448,30 @@ mod tests {
     }
 
     #[test]
+    fn editable_body_from_page_markdown_should_remove_promoted_front_matter() {
+        let body =
+            editable_body_from_page_markdown("---\npromoted: false\nstatus: draft\n---\nBody");
+
+        assert_eq!(body, "---\nstatus: draft\n---\n\nBody");
+    }
+
+    #[test]
     fn categories_text_from_page_markdown_should_parse_multiline_categories() {
         let categories =
             categories_text_from_page_markdown("---\ncategories:\n  - Test Page\n  - npc\n---\n");
 
         assert_eq!(categories, "test-page, npc");
+    }
+
+    #[test]
+    fn promoted_from_page_markdown_should_default_to_true_when_missing() {
+        assert!(promoted_from_page_markdown("# Page"));
+    }
+
+    #[test]
+    fn promoted_from_page_markdown_should_parse_false_front_matter() {
+        assert!(!promoted_from_page_markdown(
+            "---\npromoted: false\n---\n\n# Page"
+        ));
     }
 }
