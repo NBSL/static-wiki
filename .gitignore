@@ -1,11 +1,13 @@
 /target
 /dist
+/media
 /wiki-data/*
 /.dioxus
 /node_modules
 .env
 *.db
 *.sqlite
+/assets/tailwind.css
 !/wiki-data/components/
 /wiki-data/components/*
 !/wiki-data/components/*.json
