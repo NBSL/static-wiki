@@ -13,3 +13,8 @@
 !/wiki-data/pages/
 /wiki-data/pages/*
 !/wiki-data/pages/home.md
+
+
+!/assets/
+/assets/*
+!/assets/tailwind.css
