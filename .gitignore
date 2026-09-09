@@ -1,8 +1,11 @@
 /target
 /dist
-/wiki-data
+/wiki-data/*
 /.dioxus
 /node_modules
 .env
 *.db
 *.sqlite
+!/wiki-data/components/
+/wiki-data/components/*
+!/wiki-data/components/*.json

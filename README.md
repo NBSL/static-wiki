@@ -114,22 +114,6 @@ Status: Draft
 
 Declarative fields support `text`, `image`, `list`, `key_value_list`, and `class_marker`. Image fields can define numeric `width` and `height` attributes, or a square `size` value that sets both. Manifests can also define a safe `layout` with `container`, `field`, and `remaining_fields` nodes for nested component markup. Text is escaped, image paths are restricted to safe local media paths or `http(s)` URLs, and manifest tags/classes are sanitized before rendering.
 
-Pages can also include RPG-style item panels with a fenced `item-card` block. The `item`, `itembox`, and `item-box` aliases work too:
-
-````markdown
-```item-card
-title: Amulet of Loyalty
-icon: necklace
-tags: MAGIC, UNIQUE
-line: Slot: NECK
-line: INT: +5 | WIS: +5
-line: Mana: +30
-description: A simple pendant carrying Lady Elana's final vow, clasped from Roon Torvald's lifeless chest.
-line: Weight: 0.1 | Size: SMALL
-line: Class: ALL
-line: Race: ALL
-```
-````
 
 Roles are managed with `role-system` using its filesystem backend at `XP_WIKI_ROLE_FILE`. The app bootstraps `admin`, `editor`, and `viewer` roles there. Authenticated users are tracked in `XP_WIKI_USER_FILE`, and admins can assign `admin`, `editor`, `viewer`, or `none` from the Users tab. The Settings tab is locked to admins and shows the runtime storage, auth, role, and upload-limit configuration.
 
