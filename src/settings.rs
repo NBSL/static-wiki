@@ -1,8 +1,8 @@
 use crate::models::{AuthProviderInfo, SettingsOverview};
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 use crate::user::{AuthUser, NO_ROLE_LABEL};
 use dioxus::prelude::*;
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 use std::path::{Path, PathBuf};
 
 #[component]
@@ -114,14 +114,16 @@ fn auth_provider_summary(providers: &[AuthProviderInfo]) -> String {
     }
 }
 
-#[get("/api/settings", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), get("/api/settings", headers: dioxus::fullstack::HeaderMap))]
 pub(crate) async fn load_settings_overview() -> ServerFnResult<SettingsOverview> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::ensure_can_manage_settings(&user).map_err(role_server_error)?;
     settings_overview_for_user(&user)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn settings_overview_for_user(user: &AuthUser) -> ServerFnResult<SettingsOverview> {
     let access = crate::server::roles::access_for_user(user).map_err(role_server_error)?;
     let data_dir = configured_data_dir();
@@ -153,26 +155,26 @@ fn settings_overview_for_user(user: &AuthUser) -> ServerFnResult<SettingsOvervie
     })
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn configured_data_dir() -> PathBuf {
     crate::server::env::optional_env("XP_WIKI_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("wiki-data"))
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn configured_path(key: &str, fallback: PathBuf) -> PathBuf {
     crate::server::env::optional_env(key)
         .map(PathBuf::from)
         .unwrap_or(fallback)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn display_path(path: impl AsRef<Path>) -> String {
     path.as_ref().display().to_string()
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn format_byte_limit(bytes: usize) -> String {
     const MIB: usize = 1024 * 1024;
     if bytes.is_multiple_of(MIB) {
@@ -182,7 +184,7 @@ fn format_byte_limit(bytes: usize) -> String {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn authenticated_user_from_headers(
     headers: &dioxus::fullstack::HeaderMap,
 ) -> ServerFnResult<AuthUser> {
@@ -195,7 +197,7 @@ fn authenticated_user_from_headers(
     })
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn role_server_error(err: crate::server::roles::RoleAccessError) -> ServerFnError {
     let code = match err {
         crate::server::roles::RoleAccessError::Forbidden { .. } => 403,

@@ -28,7 +28,7 @@ fn parser() -> &'static MarkdownIt {
     })
 }
 
-#[cfg(any(feature = "server", test))]
+#[cfg(any(feature = "server", feature = "local", test))]
 pub fn title_from_markdown(markdown: &str, fallback: &str) -> String {
     markdown
         .lines()
@@ -83,7 +83,7 @@ pub fn editable_body_from_page_markdown(markdown: &str) -> String {
     front_matter_and_body_to_markdown(&front_matter_without_editor_metadata(front_matter), body)
 }
 
-#[cfg(any(feature = "server", test))]
+#[cfg(any(feature = "server", feature = "local", test))]
 pub fn page_body_from_markdown(markdown: &str) -> &str {
     split_leading_front_matter(markdown)
         .map(|(_front_matter, body)| body.trim_start())
@@ -316,7 +316,7 @@ fn split_leading_front_matter_block(markdown: &str) -> Option<(&str, &str)> {
     Some((&markdown[..body_start], body))
 }
 
-#[cfg(any(feature = "server", test))]
+#[cfg(any(feature = "server", feature = "local", test))]
 pub fn humanize_slug(slug: &str) -> String {
     let mut title = String::new();
     for word in slug.split(['-', '_']).filter(|word| !word.is_empty()) {

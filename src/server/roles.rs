@@ -81,6 +81,7 @@ pub fn ensure_can_write_page(user: &AuthUser, slug: &str) -> RoleResult<()> {
     ensure_can_write_page_with_policy(user, slug, &policy)
 }
 
+#[cfg(not(feature = "local"))]
 pub fn record_authenticated_user(user: &AuthUser) -> RoleResult<()> {
     let policy = RolePolicy::from_env()?;
     record_authenticated_user_with_policy(user, &policy)
@@ -134,6 +135,7 @@ fn ensure_can_write_page_with_policy(
     }
 }
 
+#[cfg(not(feature = "local"))]
 fn record_authenticated_user_with_policy(user: &AuthUser, policy: &RolePolicy) -> RoleResult<()> {
     let _guard = ROLE_LOCK.lock().map_err(|_| RoleAccessError::Lock)?;
     let mut store = UserStore::load(&policy.user_file_path)?;
@@ -641,7 +643,15 @@ impl RolePolicy {
                 Some(role) => Some(WikiRole::from_name(role)?),
                 None => Some(WikiRole::Editor),
             },
-            admin_users: env_list("XP_WIKI_ADMIN_USERS"),
+            admin_users: {
+                let users = env_list("XP_WIKI_ADMIN_USERS");
+                #[cfg(feature = "local")]
+                let users = users
+                    .into_iter()
+                    .chain([crate::desktop::LOCAL_USER_ID.to_owned()])
+                    .collect();
+                users
+            },
             editor_users: env_list("XP_WIKI_EDITOR_USERS"),
             viewer_users: env_list("XP_WIKI_VIEWER_USERS"),
         })

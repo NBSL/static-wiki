@@ -194,25 +194,31 @@ fn UserRow(
     }
 }
 
-#[get("/api/users", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), get("/api/users", headers: dioxus::fullstack::HeaderMap))]
 pub(crate) async fn list_managed_users() -> ServerFnResult<Vec<ManagedUser>> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::list_managed_users(&user).map_err(role_server_error)
 }
 
-#[post("/api/users/save", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/users/save", headers: dioxus::fullstack::HeaderMap))]
 pub(crate) async fn save_managed_user(input: ManagedUserInput) -> ServerFnResult<ManagedUser> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::save_managed_user(&user, input).map_err(role_server_error)
 }
 
-#[post("/api/users/delete", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/users/delete", headers: dioxus::fullstack::HeaderMap))]
 pub(crate) async fn delete_managed_user(id: String) -> ServerFnResult<()> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::delete_managed_user(&user, &id).map_err(role_server_error)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn authenticated_user_from_headers(
     headers: &dioxus::fullstack::HeaderMap,
 ) -> ServerFnResult<AuthUser> {
@@ -225,7 +231,7 @@ fn authenticated_user_from_headers(
     })
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn role_server_error(err: crate::server::roles::RoleAccessError) -> ServerFnError {
     let code = match err {
         crate::server::roles::RoleAccessError::Forbidden { .. } => 403,

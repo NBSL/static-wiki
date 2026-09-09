@@ -250,7 +250,7 @@ fn with_store<T>(operation: impl FnOnce(&WikiStore) -> StorageResult<T>) -> Stor
 }
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("XP_WIKI_DATA_DIR")
+    crate::server::env::optional_env("XP_WIKI_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("wiki-data"))
 }

@@ -145,9 +145,12 @@ npm run dev:web
 
 `dev:web` passes `--open false` to Dioxus. If your desktop opener is configured correctly and you want Dioxus to open the browser automatically, run `npm run dev:web:open` instead.
 
-Run the desktop app against the same server:
+Run the standalone desktop app (no backend or OAuth login required):
 
 ```sh
-export XP_WIKI_SERVER_URL="http://127.0.0.1:8080"
 npm run dev:desktop
 ```
+
+The desktop app reads and writes the local `wiki-data` Git repository directly, including pages, history, templates, media, and HTML exports. Set `XP_WIKI_DATA_DIR` in `.env` to use a different directory. Desktop edits use the local owner identity with administrator access. The web build continues to use server APIs and OAuth.
+
+Run the local data regression suite without desktop system libraries with `cargo test --features local`.

@@ -1,5 +1,5 @@
 use crate::models::{MediaEntry, MediaEntryKind, MediaListing};
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 use crate::user::AuthUser;
 use dioxus::prelude::*;
 
@@ -636,46 +636,54 @@ fn media_delete_target_label(path: &str, kind: MediaEntryKind) -> String {
     }
 }
 
-#[post("/api/media/list")]
+#[cfg_attr(not(feature = "local"), post("/api/media/list"))]
 pub(crate) async fn list_media_entries(path: String) -> ServerFnResult<MediaListing> {
     crate::server::storage::list_media(&path).map_err(media_storage_error)
 }
 
-#[post("/api/media/folders", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/media/folders", headers: dioxus::fullstack::HeaderMap))]
 async fn create_media_folder(parent: String, name: String) -> ServerFnResult<MediaListing> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::ensure_can_write_page(&user, "media").map_err(role_server_error)?;
     crate::server::storage::create_media_folder(&parent, &name, &user).map_err(media_storage_error)
 }
 
-#[post("/api/media/upload", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/media/upload", headers: dioxus::fullstack::HeaderMap))]
 async fn upload_media_file(
     folder: String,
     filename: String,
     contents: Vec<u8>,
 ) -> ServerFnResult<MediaListing> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::ensure_can_write_page(&user, "media").map_err(role_server_error)?;
     crate::server::storage::save_media_file(&folder, &filename, &contents, &user)
         .map_err(media_storage_error)
 }
 
-#[post("/api/media/move", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/media/move", headers: dioxus::fullstack::HeaderMap))]
 async fn move_media_file(source_path: String, target_folder: String) -> ServerFnResult<()> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::ensure_can_write_page(&user, "media").map_err(role_server_error)?;
     crate::server::storage::move_media_file(&source_path, &target_folder, &user)
         .map_err(media_storage_error)
 }
 
-#[post("/api/media/delete", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/media/delete", headers: dioxus::fullstack::HeaderMap))]
 async fn delete_media_entry(path: String) -> ServerFnResult<()> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = authenticated_user_from_headers(&headers)?;
     crate::server::roles::ensure_can_write_page(&user, "media").map_err(role_server_error)?;
     crate::server::storage::delete_media_entry(&path, &user).map_err(media_storage_error)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn authenticated_user_from_headers(
     headers: &dioxus::fullstack::HeaderMap,
 ) -> ServerFnResult<AuthUser> {
@@ -688,7 +696,7 @@ fn authenticated_user_from_headers(
     })
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn media_storage_error(err: crate::server::storage::StorageError) -> ServerFnError {
     let code = match err {
         crate::server::storage::StorageError::InvalidMediaPath(_)
@@ -709,7 +717,7 @@ fn media_storage_error(err: crate::server::storage::StorageError) -> ServerFnErr
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn role_server_error(err: crate::server::roles::RoleAccessError) -> ServerFnError {
     let code = match err {
         crate::server::roles::RoleAccessError::Forbidden { .. } => 403,

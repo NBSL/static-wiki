@@ -27,7 +27,9 @@ tempfile = "3"
 [features]
 default = []
 web = ["dioxus/web"]
-desktop = ["dioxus/desktop"]
+desktop = ["dioxus/desktop", "local"]
+# Direct local operations, also testable without the desktop window libraries.
+local = ["dep:dotenvy", "dep:git2", "dep:once_cell", "dep:role-system", "dep:thiserror"]
 server = [
     "dioxus/server",
     "dep:base64",

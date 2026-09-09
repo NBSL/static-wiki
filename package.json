@@ -3,7 +3,7 @@
   "scripts": {
     "dev:web": "dx serve --web --open false",
     "dev:web:open": "dx serve --web",
-    "dev:desktop": "dx serve --desktop",
+    "dev:desktop": "dx serve --desktop --fullstack false",
     "tailwind:build": "tailwindcss -i ./input.css -o ./assets/tailwind.css --minify",
     "tailwind:watch": "tailwindcss -i ./input.css -o ./assets/tailwind.css --watch"
   },

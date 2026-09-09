@@ -18,7 +18,7 @@ pub(crate) fn add_rules_with_manifests(parser: &mut MarkdownIt, manifests: &[Str
     declarative::add_rules(parser, manifests);
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 pub(crate) fn builtin_declarative_manifests() -> &'static [(&'static str, &'static str)] {
     declarative::BUILTIN_MANIFESTS
 }

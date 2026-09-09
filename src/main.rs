@@ -1,4 +1,6 @@
 mod builder;
+#[cfg(feature = "local")]
+mod desktop;
 mod markdown;
 mod markdown_components;
 mod media;
@@ -7,7 +9,7 @@ mod settings;
 mod slug;
 mod user;
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 mod server;
 
 use builder::{EditorMode, ModeButton, PageBuilder};
@@ -30,8 +32,9 @@ use user::{
 };
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "desktop")))]
 const SERVER_FUNCTION_BODY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+const OAUTH_ENABLED: bool = !cfg!(feature = "desktop");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActiveTab {
@@ -61,7 +64,7 @@ fn markdown_component_manifests(state: &Option<ServerFnResult<Vec<String>>>) -> 
 }
 
 fn main() {
-    #[cfg(feature = "server")]
+    #[cfg(all(feature = "server", not(feature = "desktop")))]
     {
         dioxus::serve(|| async move {
             use dioxus::server::{
@@ -88,14 +91,12 @@ fn main() {
         });
     }
 
-    #[cfg(all(not(feature = "server"), feature = "desktop"))]
+    #[cfg(feature = "desktop")]
     {
-        let server_url = desktop_server_url();
-        dioxus::fullstack::set_server_url(Box::leak(server_url.into_boxed_str()));
         dioxus::launch(App);
     }
 
-    #[cfg(all(not(feature = "server"), feature = "web"))]
+    #[cfg(all(not(feature = "server"), not(feature = "desktop"), feature = "web"))]
     {
         dioxus::launch(App);
     }
@@ -108,6 +109,8 @@ fn main() {
 
 #[component]
 fn App() -> Element {
+    #[cfg(feature = "desktop")]
+    desktop::use_local_assets();
     rsx! { Router::<Route> {} }
 }
 
@@ -165,6 +168,7 @@ fn WikiApp(route_slug: String) -> Element {
     }));
 
     let navigator = use_navigator();
+    use_markdown_navigation();
 
     let mut user_resource = use_resource(move || async move {
         let _ = refresh_key();
@@ -176,6 +180,9 @@ fn WikiApp(route_slug: String) -> Element {
     });
     let mut auth_providers_resource = use_resource(move || async move {
         let _ = refresh_key();
+        if !OAUTH_ENABLED {
+            return Ok(Vec::new());
+        }
         configured_oauth_providers().await
     });
     let mut pages_resource = use_resource(move || async move {
@@ -530,7 +537,8 @@ fn WikiApp(route_slug: String) -> Element {
                             login_links,
                             providers_loading: auth_providers_loading,
                             provider_error: auth_provider_error,
-                            logout_url
+                            logout_url,
+                            oauth_disabled: !OAUTH_ENABLED
                         }
                         if !status().is_empty() {
                             div { class: "flex flex-wrap items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900",
@@ -775,6 +783,7 @@ fn AuthStatus(
     providers_loading: bool,
     provider_error: Option<String>,
     logout_url: String,
+    oauth_disabled: bool,
 ) -> Element {
     let provider_error = provider_error.unwrap_or_default();
     let has_provider_error = !provider_error.is_empty();
@@ -784,12 +793,15 @@ fn AuthStatus(
             match user {
                 Some(user) => rsx! {
                     span { class: "rounded-md bg-slate-100 px-3 py-2 text-slate-700", "{user.name}" }
-                    a {
-                        class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 font-semibold text-slate-800 hover:border-stone-400",
-                        href: "{logout_url}",
-                        "Sign out"
+                    if !oauth_disabled {
+                        a {
+                            class: "inline-flex h-9 items-center rounded-md border border-stone-300 bg-white px-3 font-semibold text-slate-800 hover:border-stone-400",
+                            href: "{logout_url}",
+                            "Sign out"
+                        }
                     }
                 },
+                None if oauth_disabled => rsx! {},
                 None if providers_loading => rsx! {
                     span { class: "rounded-md bg-slate-100 px-3 py-2 text-slate-600", "Loading sign-in" }
                 },
@@ -849,6 +861,27 @@ fn PageNavButton(
             span { class: "truncate", "{title}" }
         }
     }
+}
+
+// Links inside rendered Markdown cannot use the Rust Link component.
+fn use_markdown_navigation() {
+    let navigator = use_navigator();
+    use_effect(move || {
+        spawn(async move {
+            let mut links = document::eval(include_str!("markdown_links.js"));
+            while let Ok(slug) = links.recv::<String>().await {
+                if slug::is_valid_slug(&slug) {
+                    navigator.push(Route::Page { slug });
+                }
+            }
+        });
+    });
+    use_drop(|| {
+        document::eval(
+            "window.__xpWikiMarkdownLinksCleanup?.(); \
+             delete window.__xpWikiMarkdownLinksCleanup;",
+        );
+    });
 }
 
 #[component]
@@ -1155,12 +1188,14 @@ fn DiffLineView(line: models::DiffLine) -> Element {
     }
 }
 
-#[get("/api/session", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), get("/api/session", headers: dioxus::fullstack::HeaderMap))]
 async fn current_user() -> ServerFnResult<Option<AuthUser>> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     Ok(server::auth::current_user_from_headers(&headers))
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "desktop")))]
 async fn media_handler(
     dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
 ) -> dioxus::server::axum::response::Response {
@@ -1189,7 +1224,7 @@ async fn media_handler(
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(feature = "desktop")))]
 async fn export_handler(
     dioxus::server::axum::extract::Path(path): dioxus::server::axum::extract::Path<String>,
 ) -> dioxus::server::axum::response::Response {
@@ -1218,8 +1253,10 @@ async fn export_handler(
     }
 }
 
-#[get("/api/session/access", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), get("/api/session/access", headers: dioxus::fullstack::HeaderMap))]
 async fn current_user_access() -> ServerFnResult<UserAccess> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     match server::auth::current_user_from_headers(&headers) {
         Some(user) => server::roles::access_for_user(&user).map_err(role_server_error),
         None => Ok(UserAccess {
@@ -1230,33 +1267,35 @@ async fn current_user_access() -> ServerFnResult<UserAccess> {
     }
 }
 
-#[get("/api/auth/providers")]
+#[cfg_attr(not(feature = "local"), get("/api/auth/providers"))]
 async fn configured_oauth_providers() -> ServerFnResult<Vec<AuthProviderInfo>> {
     Ok(server::auth::configured_providers())
 }
 
-#[get("/api/pages")]
+#[cfg_attr(not(feature = "local"), get("/api/pages"))]
 async fn list_wiki_pages() -> ServerFnResult<Vec<PageSummary>> {
     server::storage::list_pages().map_err(server_error)
 }
 
-#[get("/api/pages/{slug}")]
+#[cfg_attr(not(feature = "local"), get("/api/pages/{slug}"))]
 async fn get_wiki_page(slug: String) -> ServerFnResult<Option<PageDetail>> {
     server::storage::read_page(&slug).map_err(server_error)
 }
 
-#[get("/api/templates")]
+#[cfg_attr(not(feature = "local"), get("/api/templates"))]
 async fn list_page_templates() -> ServerFnResult<Vec<PageTemplateSummary>> {
     server::storage::list_templates().map_err(server_error)
 }
 
-#[get("/api/markdown-components")]
+#[cfg_attr(not(feature = "local"), get("/api/markdown-components"))]
 async fn list_markdown_component_manifests() -> ServerFnResult<Vec<String>> {
     server::storage::list_component_manifests().map_err(server_error)
 }
 
-#[post("/api/export/html", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/export/html", headers: dioxus::fullstack::HeaderMap))]
 async fn export_wiki_html() -> ServerFnResult<HtmlExport> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = server::auth::current_user_from_headers(&headers).ok_or_else(|| {
         ServerFnError::ServerError {
             message: "sign in to export HTML".to_owned(),
@@ -1269,7 +1308,7 @@ async fn export_wiki_html() -> ServerFnResult<HtmlExport> {
     server::storage::export_html_site().map_err(server_error)
 }
 
-#[post("/api/templates/apply")]
+#[cfg_attr(not(feature = "local"), post("/api/templates/apply"))]
 async fn apply_page_template(
     template_slug: String,
     draft_slug: String,
@@ -1278,12 +1317,14 @@ async fn apply_page_template(
     server::storage::page_template_draft(&template_slug, &draft_slug, &title).map_err(server_error)
 }
 
-#[post("/api/pages/save", headers: dioxus::fullstack::HeaderMap)]
+#[cfg_attr(not(feature = "local"), post("/api/pages/save", headers: dioxus::fullstack::HeaderMap))]
 async fn save_wiki_page(
     slug: String,
     title: String,
     markdown: String,
 ) -> ServerFnResult<PageDetail> {
+    #[cfg(feature = "local")]
+    let headers = dioxus::fullstack::HeaderMap::new();
     let user = server::auth::current_user_from_headers(&headers).ok_or_else(|| {
         ServerFnError::ServerError {
             message: "sign in to save changes".to_owned(),
@@ -1299,27 +1340,27 @@ async fn save_wiki_page(
     server::storage::save_page(&normalized, &title, &markdown, &user).map_err(server_error)
 }
 
-#[get("/api/pages/{slug}/history")]
+#[cfg_attr(not(feature = "local"), get("/api/pages/{slug}/history"))]
 async fn get_wiki_history(slug: String) -> ServerFnResult<Vec<PageRevision>> {
     server::storage::page_history(&slug).map_err(server_error)
 }
 
-#[get("/api/pages/{slug}/diff/{revision}")]
+#[cfg_attr(not(feature = "local"), get("/api/pages/{slug}/diff/{revision}"))]
 async fn get_wiki_diff(slug: String, revision: String) -> ServerFnResult<PageDiff> {
     server::storage::page_diff(&slug, &revision).map_err(server_error)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn server_error(err: impl ToString) -> ServerFnError {
     server_error_with_code(err, 500)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn client_validation_error(err: impl ToString) -> ServerFnError {
     server_error_with_code(err, 400)
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn server_error_with_code(err: impl ToString, code: u16) -> ServerFnError {
     ServerFnError::ServerError {
         message: err.to_string(),
@@ -1328,7 +1369,7 @@ fn server_error_with_code(err: impl ToString, code: u16) -> ServerFnError {
     }
 }
 
-#[cfg(feature = "server")]
+#[cfg(any(feature = "server", feature = "local"))]
 fn role_server_error(err: server::roles::RoleAccessError) -> ServerFnError {
     let code = match err {
         server::roles::RoleAccessError::Forbidden { .. } => 403,
@@ -1358,51 +1399,15 @@ fn auth_login_links(providers: &[AuthProviderInfo]) -> Vec<LoginLink> {
 }
 
 fn app_server_url(path: &str) -> String {
-    #[cfg(feature = "desktop")]
-    {
-        format!(
-            "{}/{}",
-            desktop_server_url().trim_end_matches('/'),
-            path.trim_start_matches('/')
-        )
-    }
-
-    #[cfg(not(feature = "desktop"))]
-    {
-        path.to_owned()
-    }
+    path.to_owned()
 }
 
 fn auth_login_url(provider: &str) -> String {
-    #[cfg(feature = "desktop")]
-    {
-        format!(
-            "{}/auth/login/{provider}",
-            desktop_server_url().trim_end_matches('/')
-        )
-    }
-
-    #[cfg(not(feature = "desktop"))]
-    {
-        format!("/auth/login/{provider}")
-    }
+    format!("/auth/login/{provider}")
 }
 
 fn auth_logout_url() -> String {
-    #[cfg(feature = "desktop")]
-    {
-        format!("{}/auth/logout", desktop_server_url().trim_end_matches('/'))
-    }
-
-    #[cfg(not(feature = "desktop"))]
-    {
-        "/auth/logout".to_owned()
-    }
-}
-
-#[cfg(feature = "desktop")]
-fn desktop_server_url() -> String {
-    std::env::var("XP_WIKI_SERVER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned())
+    "/auth/logout".to_owned()
 }
 
 #[cfg(test)]
