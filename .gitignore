@@ -10,5 +10,6 @@
 /wiki-data/components/*
 !/wiki-data/components/*.json
 
-wiki-data/pages/*
+!/wiki-data/pages/
+/wiki-data/pages/*
 !/wiki-data/pages/home.md
