@@ -1,0 +1,42 @@
+  {
+    "name": "NPC Card",
+    "fence": "npc-card",
+    "aliases": ["npc"],
+    "wrapper_tag": "aside",
+    "wrapper_class": "npc-card",
+    "aria_label": "NPC card",
+    "fields": [
+      {
+        "key": "name",
+        "type": "text",
+        "tag": "div",
+        "class": "npc-card-name"
+      },
+      {
+        "key": "portrait",
+        "type": "image",
+        "class": "npc-card-portrait",
+        "alt_from": "name"
+      },
+      {
+        "key": "role",
+        "type": "text",
+        "tag": "div",
+        "class": "npc-card-role"
+      },
+      {
+        "key": "traits",
+        "type": "list",
+        "split": "|",
+        "wrapper_tag": "ul",
+        "wrapper_class": "npc-card-traits",
+        "item_tag": "li"
+      }
+    ],
+    "unknown_fields": {
+      "class": "markdown-component-fields",
+      "row_class": "markdown-component-row",
+      "label_class": "markdown-component-label",
+      "value_class": "markdown-component-value"
+    }
+  }
